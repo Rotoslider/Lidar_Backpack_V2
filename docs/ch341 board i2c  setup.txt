@@ -1,0 +1,196 @@
+
+git clone https://github.com/frank-zago/ch341-i2c-spi-gpio.git
+cd ch*
+
+you may need gss12
+sudo apt install build-essential
+sudo apt install gcc-12 g++-12
+sudo make
+sudo make install
+
+autoload after reboot:
+sudo mkdir -p /lib/modules/$(uname -r)/extra
+sudo cp *.ko /lib/modules/$(uname -r)/extra/
+sudo depmod -a
+
+Create a blacklist entry:
+echo 'blacklist ch341' | sudo tee /etc/modprobe.d/blacklist-ch341-serial.conf
+sudo update-initramfs -u
+
+Unplug/replug the adapter after this change.
+
+CH341 must be in I2C/SPI/GPIO mode
+lsusb | grep -i 1a86
+Bus 001 Device 015: ID 1a86:5512 QinHeng Electronics CH341 in EPP/MEM/I2C mode, EPP/I2C adapter
+Bus 001 Device 003: ID 1a86:5512 QinHeng Electronics CH341 in EPP/MEM/I2C mode, EPP/I2C adapter
+
+create the group also add the udev rule:
+sudo groupadd ch341
+sudo groupadd ch341 2>/dev/null || true
+sudo adduser "$USER" ch341
+echo 'SUBSYSTEMS=="usb" ATTRS{idProduct}=="5512" ATTRS{idVendor}=="1a86" GROUP="ch341" MODE="0660"' | sudo tee /etc/udev/rules.d/99-ch341.rules
+sudo udevadm control --reload
+sudo udevadm trigger
+
+Then:
+
+    Unplug/replug the CH341.
+    Log out and log back in (or newgrp ch341) so your session picks up the new group.
+
+You should then see device nodes with proper group:
+ls -l /dev | egrep 'i2c|gpio|spi' | grep ch341
+crw-rw----  1 root    ch341   254,     1 Oct 27 09:52 gpiochip1
+crw-rw----  1 root    ch341    89,    17 Oct 27 09:52 i2c-17
+
+Enable I2C user-space access
+
+    Load i2c-dev:
+sudo modprobe i2c-dev
+autoload it on boot:
+echo 'i2c-dev' | sudo tee /etc/modules-load.d/i2c-dev.conf
+sudo systemctl restart systemd-modules-load.service
+
+Verify the I2C bus shows up
+i2cdetect -l
+
+i2c-0	unknown   	SMBus I801 adapter at efa0      	N/A
+i2c-1	unknown   	Synopsys DesignWare I2C adapter 	N/A
+i2c-2	unknown   	Synopsys DesignWare I2C adapter 	N/A
+i2c-3	unknown   	Synopsys DesignWare I2C adapter 	N/A
+i2c-4	unknown   	Synopsys DesignWare I2C adapter 	N/A
+i2c-5	unknown   	Synopsys DesignWare I2C adapter 	N/A
+i2c-6	unknown   	Synopsys DesignWare I2C adapter 	N/A
+i2c-7	unknown   	i915 gmbus dpa                  	N/A
+i2c-8	unknown   	i915 gmbus dpb                  	N/A
+i2c-9	unknown   	i915 gmbus dpc                  	N/A
+i2c-10	unknown   	i915 gmbus tc1                  	N/A
+i2c-11	unknown   	i915 gmbus tc2                  	N/A
+i2c-12	unknown   	i915 gmbus tc3                  	N/A
+i2c-13	unknown   	i915 gmbus tc4                  	N/A
+i2c-14	unknown   	i915 gmbus tc5                  	N/A
+i2c-15	unknown   	i915 gmbus tc6                  	N/A
+i2c-16	unknown   	AUX B/DDI B/PHY B               	N/A
+i2c-17	i2c       	CH341 I2C USB bus 001 device 015	I2C adapter
+
+Once the bus exists:
+sudo apt-get install -y i2c-tools
+lapanda@delta3:~/builds/ch341-i2c-spi-gpio$ i2cdetect -y 17
+     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f
+00:                         -- -- -- -- -- -- -- -- 
+10: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- 
+20: -- -- -- -- -- -- -- -- -- 29 -- -- -- -- -- -- 
+30: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- 
+40: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- 
+50: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- 
+60: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- 
+70: -- -- -- -- -- -- -- --        
+
+i2cget -y 17 0x29 0x00   # example: read register 0x00 from device 0x40
+i2cset -y 17 0x29 0x01 0xFF  # example: write 0xFF to reg 0x01
+
+
+
+
+
+
+# if CH41 board does not work maybe i2c on board the 3delta does
+
+Make sure the Intel-side I²C bus is really alive
+sudo apt update
+sudo apt install i2c-tools
+# scan the bus that the 40-pin header uses
+sudo i2cdetect -y 1
+
+Install the Python SMBus back-end
+sudo apt install python3-smbus python3-pip
+python3 -c "import smbus, sys; print('smbus OK')"
+
+List all i2c adapters present
+i2cdetect -l
+i2c-0	unknown   	Synopsys DesignWare I2C adapter 	N/A
+i2c-1	unknown   	Synopsys DesignWare I2C adapter 	N/A
+i2c-2	unknown   	SMBus I801 adapter at efa0      	N/A
+i2c-3	unknown   	Synopsys DesignWare I2C adapter 	N/A
+i2c-4	unknown   	Synopsys DesignWare I2C adapter 	N/A
+i2c-5	unknown   	Synopsys DesignWare I2C adapter 	N/A
+i2c-6	unknown   	i915 gmbus dpa                  	N/A
+i2c-7	unknown   	i915 gmbus dpb                  	N/A
+i2c-8	unknown   	i915 gmbus dpc                  	N/A
+i2c-9	unknown   	i915 gmbus tc1                  	N/A
+i2c-10	unknown   	i915 gmbus tc2                  	N/A
+i2c-11	unknown   	i915 gmbus tc3                  	N/A
+i2c-12	unknown   	i915 gmbus tc4                  	N/A
+i2c-13	unknown   	i915 gmbus tc5                  	N/A
+i2c-14	unknown   	i915 gmbus tc6                  	N/A
+i2c-15	unknown   	AUX B/DDI B/PHY B               	N/A
+
+
+Scan every bus until the Miranda appears. paste into a terminal:
+for n in $(i2cdetect -l | awk '{print $1}' | sed 's/i2c-//'); do
+    echo "========= scanning /dev/i2c-$n ========="
+    sudo i2cdetect -y "$n"
+done
+
+# cheat-sheet for LP3-Delta find which bus reaches the external header
+for n in {0..17}; do sudo i2cdetect -y "$n" 2>/dev/null | grep -q '28\|29' && echo "Motor on i2c-$n"; done
+
+bash to locate the motor. paste into terminal:
+for n in {0..17}; do echo "=== scanning i2c-$n ==="; sudo i2cdetect -y "$n" 2>/dev/null | grep -E '(28|29)' && echo "^^^ MOTOR FOUND on i2c-$n ^^^"; done
+-----------------------------------------------------
+
+If the kernel has been updated you will need to rebuild it.
+Here's how to verify and fix it:
+
+  1. Check if the driver module is loaded:
+  lsmod | grep ch341
+  If you see ch341 listed, that's the stock serial driver (the one you blacklisted) — it shouldn't be there. If you see nothing at
+   all, the i2c/spi/gpio driver isn't loaded either.
+
+  2. Check dmesg for clues:
+  sudo dmesg | grep -i ch341
+  This will show if the kernel is trying to load a driver and failing, or if it's loading the wrong (serial) driver.
+
+  3. Check your current kernel vs. what the module was built for:
+  uname -r
+  ls /lib/modules/*/extra/ch341-i2c-spi-gpio.ko 2>/dev/null || echo "No module found in any kernel's extra dir"
+  If your current uname -r doesn't match the directory where the .ko file lives, that's your problem.
+
+  4. Fix — rebuild the driver for the current kernel:
+  cd ~/builds/ch341-i2c-spi-gpio
+  git pull                          # grab any updates
+  sudo make clean
+  sudo make
+  sudo make install
+  sudo mkdir -p /lib/modules/$(uname -r)/extra
+  sudo cp *.ko /lib/modules/$(uname -r)/extra/
+  sudo depmod -a
+
+    * Note that make install already put the modules into /lib/modules/6.8.0-101-generic/updates/ and ran signing, so they should
+  already be findable by depmod. But the extra/ copy matches your original setup notes, so it doesn't hurt to have them there too.
+  
+  5. Make sure the blacklist is still in effect:
+  cat /etc/modprobe.d/blacklist-ch341-serial.conf
+  Should show blacklist ch341. If it's missing, re-run:
+  echo 'blacklist ch341' | sudo tee /etc/modprobe.d/blacklist-ch341-serial.conf
+  sudo update-initramfs -u
+  
+  # Run depmod and load the driver
+  sudo depmod -a
+  sudo modprobe ch341_core
+  sudo modprobe i2c_ch341
+
+  6. may need to Unload any wrong driver, load the right one, and replug:
+  sudo modprobe -r ch341              # remove stock serial driver if loaded
+  sudo modprobe ch341_i2c_spi_gpio    # load the correct one (may need insmod if modprobe doesn't find it)
+  Then physically unplug and replug the CH341 board.
+
+  7. Verify:
+  ls -l /dev | egrep 'i2c|gpio|spi' | grep ch341
+  i2cdetect -l
+  
+  **** every time Ubuntu updates your kernel, you'll need to rebuild the CH341 driver with:
+  sudo make clean && sudo make && sudo make install && sudo depmod -a from ~/builds/ch341-i2c-spi-gpio.
+
+
+
+

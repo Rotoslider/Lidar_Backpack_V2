@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Lidar Backpack Scanner</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #1a1a2e;
+    color: #eee;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+  }
+  h1 {
+    font-size: 1.8rem;
+    margin-bottom: 24px;
+    text-align: center;
+  }
+  .section {
+    width: 100%;
+    max-width: 420px;
+    margin-bottom: 20px;
+  }
+  .section-label {
+    font-size: 1rem;
+    color: #aaa;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  /* Lidar selector */
+  .lidar-selector {
+    display: flex;
+    gap: 12px;
+  }
+  .lidar-btn {
+    flex: 1;
+    padding: 18px 10px;
+    font-size: 1.3rem;
+    font-weight: bold;
+    border: 3px solid #444;
+    border-radius: 12px;
+    background: #16213e;
+    color: #ccc;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.2s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .lidar-btn.selected {
+    border-color: #4cc9f0;
+    background: #1a3a5c;
+    color: #4cc9f0;
+  }
+  .lidar-btn:active { transform: scale(0.97); }
+
+  /* Action buttons */
+  .actions {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .action-btn {
+    padding: 22px;
+    font-size: 1.5rem;
+    font-weight: bold;
+    border: none;
+    border-radius: 14px;
+    cursor: pointer;
+    transition: all 0.2s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .action-btn:active { transform: scale(0.97); }
+  .action-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: none;
+  }
+  .btn-start {
+    background: #2d6a4f;
+    color: #b7e4c7;
+  }
+  .btn-start:not(:disabled):hover { background: #40916c; }
+  .btn-stop {
+    background: #6b2020;
+    color: #f4a0a0;
+  }
+  .btn-stop:not(:disabled):hover { background: #922b2b; }
+  .btn-force-stop {
+    background: #8b0000;
+    color: #ff6666;
+    font-size: 1.1rem;
+    padding: 16px;
+    display: none;
+  }
+  .btn-force-stop:hover { background: #a00; }
+  .btn-exit {
+    background: #333;
+    color: #aaa;
+    font-size: 1.1rem;
+    padding: 16px;
+  }
+  .btn-exit:not(:disabled):hover { background: #444; }
+
+  /* Status area */
+  .status-box {
+    background: #16213e;
+    border-radius: 12px;
+    padding: 18px;
+  }
+  .status-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 0;
+    font-size: 1.1rem;
+  }
+  .status-label { color: #888; }
+  .status-value { font-weight: bold; }
+  .state-idle { color: #aaa; }
+  .state-starting { color: #f0c74c; }
+  .state-scanning { color: #4cc9f0; }
+  .state-stopping { color: #f4a0a0; }
+
+  /* Message banner */
+  .message-box {
+    background: #1a3a5c;
+    border-left: 4px solid #4cc9f0;
+    border-radius: 8px;
+    padding: 14px 16px;
+    font-size: 1.1rem;
+    min-height: 48px;
+    display: flex;
+    align-items: center;
+  }
+  .message-box.empty { opacity: 0.3; }
+
+  .elapsed { font-variant-numeric: tabular-nums; }
+
+  /* Health indicator */
+  .health-box {
+    border-radius: 12px;
+    padding: 14px 16px;
+    font-size: 1.1rem;
+    display: none;
+  }
+  .health-box.visible { display: block; }
+  .health-ok {
+    background: #1a3a2a;
+    border-left: 4px solid #4caf50;
+  }
+  .health-warn {
+    background: #3a3520;
+    border-left: 4px solid #ff9800;
+  }
+  .health-error {
+    background: #3a1a1a;
+    border-left: 4px solid #f44336;
+    animation: pulse-red 1.5s ease-in-out infinite;
+  }
+  .health-unknown {
+    background: #2a2a3a;
+    border-left: 4px solid #888;
+  }
+  @keyframes pulse-red {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+  }
+  .health-message {
+    font-weight: bold;
+    margin-bottom: 6px;
+  }
+  .health-metrics {
+    font-size: 0.85rem;
+    color: #aaa;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+  }
+  .health-metrics span { white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<h1>Lidar Backpack Scanner</h1>
+
+<!-- Lidar Selector -->
+<div class="section">
+  <div class="section-label">Lidar</div>
+  <div class="lidar-selector">
+    <div class="lidar-btn selected" data-lidar="ouster" onclick="selectLidar('ouster')">Ouster OS0-32</div>
+    <div class="lidar-btn" data-lidar="livox" onclick="selectLidar('livox')">Livox MID-360</div>
+  </div>
+</div>
+
+<!-- Action Buttons -->
+<div class="section actions">
+  <button class="action-btn btn-start" id="btnStart" onclick="startScan()">Start Scan</button>
+  <button class="action-btn btn-stop" id="btnStop" onclick="stopScan()" disabled>Stop Scan</button>
+  <button class="action-btn btn-force-stop" id="btnForceStop" onclick="forceStop()">Force Stop (Kill All)</button>
+</div>
+
+<!-- Live Message -->
+<div class="section">
+  <div class="section-label">Activity</div>
+  <div class="message-box empty" id="messageBox">&mdash;</div>
+</div>
+
+<!-- Scan Health -->
+<div class="section">
+  <div class="section-label">Scan Health</div>
+  <div class="health-box" id="healthBox">
+    <div class="health-message" id="healthMessage"></div>
+    <div class="health-metrics" id="healthMetrics"></div>
+  </div>
+</div>
+
+<!-- Status -->
+<div class="section">
+  <div class="section-label">Status</div>
+  <div class="status-box">
+    <div class="status-row">
+      <span class="status-label">State</span>
+      <span class="status-value state-idle" id="statusState">idle</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Lidar</span>
+      <span class="status-value" id="statusLidar">ouster</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Elapsed</span>
+      <span class="status-value elapsed" id="statusElapsed">&mdash;</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Output</span>
+      <span class="status-value" id="statusOutput" style="font-size:0.85rem; word-break:break-all;">&mdash;</span>
+    </div>
+  </div>
+</div>
+
+<!-- Exit -->
+<div class="section">
+  <button class="action-btn btn-exit" id="btnExit" onclick="exitApp()">Exit</button>
+</div>
+
+<script>
+let selectedLidar = 'ouster';
+
+function selectLidar(type) {
+  selectedLidar = type;
+  document.querySelectorAll('.lidar-btn').forEach(btn => {
+    btn.classList.toggle('selected', btn.dataset.lidar === type);
+  });
+}
+
+function api(endpoint, method, body) {
+  const opts = { method: method || 'GET', headers: {} };
+  if (body) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  return fetch(endpoint, opts).then(r => r.json());
+}
+
+function startScan() {
+  document.getElementById('btnStart').disabled = true;
+  api('/api/start', 'POST', { lidar: selectedLidar })
+    .then(data => {
+      if (!data.ok) alert(data.msg);
+    })
+    .catch(err => {
+      alert('Error: ' + err);
+      document.getElementById('btnStart').disabled = false;
+    });
+}
+
+function stopScan() {
+  document.getElementById('btnStop').disabled = true;
+  api('/api/stop', 'POST')
+    .then(data => {
+      if (!data.ok) alert(data.msg);
+    })
+    .catch(err => alert('Error: ' + err));
+}
+
+function forceStop() {
+  api('/api/force_stop', 'POST')
+    .then(data => {
+      if (!data.ok) alert(data.msg);
+    })
+    .catch(err => alert('Error: ' + err));
+}
+
+function exitApp() {
+  if (!confirm('Stop everything and shut down the server?')) return;
+  api('/api/exit', 'POST').catch(() => {});
+}
+
+function formatElapsed(seconds) {
+  if (seconds === null || seconds === undefined) return '\u2014';
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return m + ':' + String(s).padStart(2, '0');
+}
+
+function updateStatus() {
+  api('/api/status')
+    .then(data => {
+      const stateEl = document.getElementById('statusState');
+      stateEl.textContent = data.state;
+      stateEl.className = 'status-value state-' + data.state;
+
+      document.getElementById('statusLidar').textContent = data.lidar;
+      document.getElementById('statusElapsed').textContent = formatElapsed(data.elapsed);
+      document.getElementById('statusOutput').textContent = data.output_dir || '\u2014';
+
+      // Update message banner
+      const msgBox = document.getElementById('messageBox');
+      if (data.message) {
+        msgBox.textContent = data.message;
+        msgBox.className = 'message-box';
+      } else {
+        msgBox.innerHTML = '&mdash;';
+        msgBox.className = 'message-box empty';
+      }
+
+      // Update health indicator
+      const healthBox = document.getElementById('healthBox');
+      const healthMsg = document.getElementById('healthMessage');
+      const healthMetrics = document.getElementById('healthMetrics');
+      if (data.health) {
+        const h = data.health;
+        healthBox.className = 'health-box visible health-' + h.status;
+        healthMsg.textContent = h.message;
+        if (h.pos_cov !== undefined) {
+          let metrics =
+            '<span>Pos cov: ' + h.pos_cov.toFixed(4) + '</span>' +
+            '<span>Rot cov: ' + h.rot_cov.toFixed(4) + '</span>' +
+            '<span>Speed: ' + h.speed.toFixed(1) + ' m/s</span>';
+          if (h.points !== undefined && h.points >= 0) {
+            metrics += '<span>Points: ' + h.points + '</span>';
+          }
+          metrics += '<span>Rate: ' + h.msg_rate.toFixed(0) + ' Hz</span>';
+          healthMetrics.innerHTML = metrics;
+        } else {
+          healthMetrics.innerHTML = '';
+        }
+      } else {
+        healthBox.className = 'health-box';
+      }
+
+      const idle = data.state === 'idle';
+      const notIdle = !idle;
+      document.getElementById('btnStart').disabled = !idle;
+      document.getElementById('btnStop').disabled = idle;
+      // Force Stop always visible when not idle — the escape hatch
+      document.getElementById('btnForceStop').style.display = notIdle ? 'block' : 'none';
+
+      // Disable lidar selector while not idle
+      document.querySelectorAll('.lidar-btn').forEach(btn => {
+        btn.style.pointerEvents = idle ? 'auto' : 'none';
+        btn.style.opacity = idle ? '1' : '0.5';
+      });
+    })
+    .catch(() => {});
+}
+
+// Poll status every 2 seconds
+setInterval(updateStatus, 2000);
+updateStatus();
+</script>
+</body>
+</html>
