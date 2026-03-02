@@ -16,7 +16,8 @@ Phone Browser (http://<ip>:5000)
   backpack_scanner.py  (Flask, main process)
         |
         |-- subprocess: Lidar driver (Ouster or Livox ROS 2 node)
-        |-- subprocess: FAST-LIO2 (SLAM + RViz)
+        |-- subprocess: FAST-LIO2 (SLAM)
+        |-- subprocess: RViz2 (separate process group — killed cleanly on stop)
         |-- subprocess: ros2 bag record
         |-- subprocess: scan_monitor.py (health monitor ROS 2 node)
         |
@@ -35,8 +36,10 @@ Phone Browser (http://<ip>:5000)
   and serves to the phone. This avoids mixing ROS 2 context into the Flask process.
 
 - **Process group management.** All subprocesses are launched with `preexec_fn=os.setsid`
-  so they get their own process groups. On stop, SIGINT is sent to each group (allowing
-  FAST-LIO to save the PCD file), with a SIGKILL fallback after 30 seconds.
+  so they get their own process groups. RViz2 is launched in its own process group
+  (separate from FAST-LIO) so it can be killed cleanly without crashing. On stop,
+  the `/map_save` service is called while FAST-LIO is still running to save the PCD,
+  then SIGINT is sent to each group, with a SIGKILL fallback after 30 seconds.
 
 ---
 
@@ -47,6 +50,7 @@ Phone Browser (http://<ip>:5000)
 | `backpack_scanner.py` | Main Flask app — scan lifecycle, motor control, API |
 | `scan_monitor.py` | ROS 2 node — subscribes to `/Odometry` and `/cloud_registered`, writes health JSON |
 | `templates/index.html` | Phone-optimized web UI |
+| `backpack-scanner.service` | systemd unit file for autostart on boot |
 | `ouster_standby.json` | Ouster config for STANDBY mode (legacy, not currently used) |
 | `ouster_normal.json` | Ouster config for NORMAL mode (legacy, not currently used) |
 
@@ -54,7 +58,26 @@ Phone Browser (http://<ip>:5000)
 
 ## Usage
 
-### Starting the App
+### Autostart (Headless)
+
+The app starts automatically on boot via a systemd service. Just power on the
+backpack computer, connect your phone to the **BackpackScanner** WiFi, and
+open `http://10.42.0.1:5000`.
+
+```bash
+# Install/update the service (one-time, or after changing the .service file)
+sudo cp ~/projects/Lidar_Backpack_V2/backpack-scanner.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable backpack-scanner.service
+
+# Useful commands
+sudo systemctl status backpack-scanner    # check if running
+sudo journalctl -u backpack-scanner -f    # tail logs live
+sudo systemctl stop backpack-scanner      # stop manually
+sudo systemctl restart backpack-scanner   # restart after code changes
+```
+
+### Manual Start (for development/debugging)
 
 ```bash
 cd ~/projects/Lidar_Backpack_V2
@@ -79,7 +102,10 @@ Open `http://<computer-ip>:5000` on your phone.
 4. **Stop Scan** — gracefully stops everything:
    - Ouster set to STANDBY (saves power/heat)
    - Motor stopped
-   - SIGINT to ROS processes (FAST-LIO saves PCD)
+   - RViz2 killed (separate process, no data to save)
+   - PCD saved via `/map_save` ROS service (while FAST-LIO is still running)
+   - SIGINT to remaining ROS processes
+   - WiFi hotspot deactivated, previous WiFi restored
    - Health file cleaned up
 
 ### Force Stop
@@ -245,6 +271,8 @@ offline reprocessing with different FAST-LIO parameters.
 | Motor doesn't spin | CH341 adapter not detected or I2C error | Check `i2cdetect -l` for CH341 bus, verify wiring |
 | Ouster won't wake from standby | Sensor hostname wrong or network issue | Ping `os-122134000147.local`, check ethernet connection |
 | PCD file not saved | Used Force Stop instead of Stop | Force Stop sends SIGKILL — use normal Stop for PCD save |
+| App doesn't start on boot | systemd service not installed/enabled | Run the install commands in the Autostart section above |
+| WiFi hotspot stays on after exit | Cleanup failed | `nmcli connection down Hotspot` then `nmcli device connect wlan0` |
 | Scan directory empty | FAST-LIO crashed during scan | Check terminal for FAST-LIO errors, review health history |
 
 ---

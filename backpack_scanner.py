@@ -102,6 +102,7 @@ class LidarManager:
         self.last_elapsed = None  # Preserved after stop for reference
         self.motor = MotorController()
         self.lock = threading.Lock()
+        self._fastlio_proc = None  # Reference to FAST-LIO for PCD save
 
         # Paths
         self.project_dir = Path(__file__).parent.resolve()
@@ -213,18 +214,26 @@ class LidarManager:
                 if not self._wait_countdown(5, "Livox driver initializing ({remaining}s)..."):
                     return
 
-            # 2. Launch FAST-LIO
+            # 2. Launch FAST-LIO (without rviz — launched separately to avoid SIGSEGV)
             if self.lidar_type == "ouster":
                 config_file = "ouster32_backpack.yaml"
             else:
                 config_file = "mid360_backpack.yaml"
+
+            # Launch with rviz if a display is available, skip when headless
+            has_display = bool(
+                os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+            )
+            use_rviz = "true" if has_display else "false"
+            if not has_display:
+                print("[Scan] No display — skipping rviz2")
 
             self._set_message("Starting FAST-LIO SLAM...")
             fastlio_cmd = (
                 f"{source_cmd} && "
                 f"cd {self.output_dir} && "
                 f"ros2 launch fast_lio mapping.launch.py "
-                f"config_file:={config_file} rviz:=true"
+                f"config_file:={config_file} rviz:={use_rviz}"
             )
 
             fastlio_proc = subprocess.Popen(
@@ -232,6 +241,7 @@ class LidarManager:
                 preexec_fn=os.setsid,
             )
             self.processes.append(fastlio_proc)
+            self._fastlio_proc = fastlio_proc
 
             if not self._wait_countdown(5, "FAST-LIO initializing ({remaining}s)..."):
                 return
@@ -326,15 +336,25 @@ class LidarManager:
                 self._set_message("Stopping motor...")
                 self.motor.stop_motor()
 
-            # 3. SIGINT all ROS processes (lets FAST-LIO save PCD)
-            self._set_message("Stopping ROS processes (saving PCD)...")
+            # 3. Save PCD via ROS service (while FAST-LIO is still running)
+            self._set_message("Saving PCD map...")
+            self._call_map_save()
+
+            # 4. Kill rviz2 before SIGINT (prevents SIGSEGV crash noise)
+            subprocess.run(
+                ["pkill", "-9", "rviz2"],
+                capture_output=True, timeout=3,
+            )
+
+            # 5. SIGINT remaining ROS processes
+            self._set_message("Stopping ROS processes...")
             for proc in self.processes:
                 try:
                     os.killpg(os.getpgid(proc.pid), signal.SIGINT)
                 except (ProcessLookupError, OSError):
                     pass
 
-            # 4. Wait for exit
+            # 6. Wait for exit
             self._set_message("Waiting for processes to exit...")
             deadline = time.time() + 30
             for proc in self.processes:
@@ -385,6 +405,27 @@ class LidarManager:
         with self.lock:
             self.state = self.IDLE
         self._set_message("Force stopped.")
+
+    def _call_map_save(self):
+        """Call FAST-LIO's /map_save service to write PCD before shutdown."""
+        try:
+            source_cmd = (
+                "source /opt/ros/humble/setup.bash && "
+                f"source {self.ros2_ws}/install/setup.bash"
+            )
+            cmd = f"{source_cmd} && ros2 service call /map_save std_srvs/srv/Trigger"
+            result = subprocess.run(
+                cmd, shell=True, executable="/bin/bash",
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                print(f"[Scan] PCD saved via /map_save service")
+            else:
+                print(f"[Scan] /map_save service failed: {result.stderr.strip()}")
+        except subprocess.TimeoutExpired:
+            print("[Scan] /map_save service call timed out")
+        except Exception as e:
+            print(f"[Scan] /map_save service error: {e}")
 
     def _set_ouster_standby(self):
         """Best-effort attempt to put Ouster into STANDBY mode."""
@@ -461,8 +502,15 @@ def api_exit():
     """Stop everything and shut down the server."""
     if manager.state != manager.IDLE:
         manager.force_stop()
-    print("[App] Shutting down...")
-    threading.Thread(target=lambda: (time.sleep(1), os._exit(0)), daemon=True).start()
+
+    def _shutdown():
+        time.sleep(1)
+        print("[App] Shutting down...")
+        manager.emergency_cleanup()
+        _stop_hotspot()
+        os._exit(0)
+
+    threading.Thread(target=_shutdown, daemon=True).start()
     return jsonify({"ok": True, "msg": "Server shutting down..."})
 
 
@@ -506,18 +554,50 @@ def _start_hotspot():
 def _stop_hotspot():
     """Deactivate hotspot and restore previous WiFi connection."""
     try:
-        subprocess.run(
+        # Bring down the hotspot connection
+        result = subprocess.run(
             ["nmcli", "connection", "down", "Hotspot"],
             capture_output=True, text=True, timeout=10,
         )
-        if _previous_wifi:
+        if result.returncode != 0:
+            print(f"[Hotspot] 'down' failed: {result.stderr.strip()}")
+            # Fallback: disconnect the wifi device directly
             subprocess.run(
+                ["nmcli", "device", "disconnect", "wlan0"],
+                capture_output=True, text=True, timeout=10,
+            )
+        time.sleep(1)
+
+        if _previous_wifi:
+            result = subprocess.run(
                 ["nmcli", "connection", "up", _previous_wifi],
                 capture_output=True, text=True, timeout=15,
             )
-            print(f"[Hotspot] Restored WiFi: {_previous_wifi}")
+            if result.returncode == 0:
+                print(f"[Hotspot] Restored WiFi: {_previous_wifi}")
+            else:
+                print(f"[Hotspot] Could not restore '{_previous_wifi}': {result.stderr.strip()}")
+                # Let NetworkManager auto-connect to any known network
+                subprocess.run(
+                    ["nmcli", "device", "wifi", "rescan"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                subprocess.run(
+                    ["nmcli", "device", "connect", "wlan0"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                print("[Hotspot] Triggered WiFi reconnect via device connect.")
         else:
-            print("[Hotspot] Hotspot stopped. No previous WiFi to restore.")
+            # No previous WiFi saved — just let NM auto-connect
+            subprocess.run(
+                ["nmcli", "device", "wifi", "rescan"],
+                capture_output=True, text=True, timeout=10,
+            )
+            subprocess.run(
+                ["nmcli", "device", "connect", "wlan0"],
+                capture_output=True, text=True, timeout=15,
+            )
+            print("[Hotspot] Hotspot stopped, triggered WiFi auto-connect.")
     except Exception as e:
         print(f"[Hotspot] Error restoring WiFi: {e}")
 
