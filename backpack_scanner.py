@@ -621,6 +621,7 @@ def api_exit():
     def _shutdown():
         time.sleep(1)
         print("[App] Shutting down...")
+        _hotspot_watchdog_stop.set()  # Stop watchdog BEFORE restoring WiFi
         manager.emergency_cleanup()
         _stop_hotspot()
         os._exit(0)
@@ -651,6 +652,7 @@ def api_shutdown():
     def _do_shutdown():
         time.sleep(2)
         print("[App] Shutting down computer...")
+        _hotspot_watchdog_stop.set()  # Stop watchdog BEFORE restoring WiFi
         manager.emergency_cleanup()
         _stop_hotspot()
         subprocess.run(["sudo", "shutdown", "-h", "now"],
