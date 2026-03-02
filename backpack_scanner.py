@@ -467,16 +467,79 @@ def api_exit():
 
 
 # ---------------------------------------------------------------------------
+# WiFi Hotspot Management
+# ---------------------------------------------------------------------------
+
+_previous_wifi = None
+
+
+def _start_hotspot():
+    """Activate the BackpackScanner hotspot, saving the current WiFi connection."""
+    global _previous_wifi
+    try:
+        # Remember current WiFi connection so we can restore on exit
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.strip().splitlines():
+            parts = line.split(":")
+            if len(parts) >= 3 and parts[1] == "802-11-wireless" and parts[0] != "Hotspot":
+                _previous_wifi = parts[0]
+                break
+
+        # Activate hotspot
+        result = subprocess.run(
+            ["nmcli", "connection", "up", "Hotspot"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            print("[Hotspot] BackpackScanner WiFi active — phone connects to http://10.42.0.1:5000")
+        else:
+            print(f"[Hotspot] Failed to start: {result.stderr.strip()}")
+            print("[Hotspot] Continuing without hotspot — connect to same network as backpack.")
+    except Exception as e:
+        print(f"[Hotspot] Could not start hotspot: {e}")
+        print("[Hotspot] Continuing without hotspot.")
+
+
+def _stop_hotspot():
+    """Deactivate hotspot and restore previous WiFi connection."""
+    try:
+        subprocess.run(
+            ["nmcli", "connection", "down", "Hotspot"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if _previous_wifi:
+            subprocess.run(
+                ["nmcli", "connection", "up", _previous_wifi],
+                capture_output=True, text=True, timeout=15,
+            )
+            print(f"[Hotspot] Restored WiFi: {_previous_wifi}")
+        else:
+            print("[Hotspot] Hotspot stopped. No previous WiFi to restore.")
+    except Exception as e:
+        print(f"[Hotspot] Error restoring WiFi: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Register cleanup so motor/lidar stop on any exit (Ctrl-C, kill, crash)
-    atexit.register(manager.emergency_cleanup)
+    # Start WiFi hotspot for phone access
+    _start_hotspot()
+
+    # Register cleanup so motor/lidar/hotspot stop on any exit
+    def _full_cleanup():
+        manager.emergency_cleanup()
+        _stop_hotspot()
+
+    atexit.register(_full_cleanup)
 
     def _signal_handler(signum, frame):
         print(f"\n[Signal] Caught signal {signum}, cleaning up...")
-        manager.emergency_cleanup()
+        _full_cleanup()
         sys.exit(1)
 
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -484,11 +547,12 @@ if __name__ == "__main__":
 
     print("=" * 60)
     print("  Lidar Backpack Scanner v1.0")
-    print("  Open http://<this-ip>:5000 in your browser")
+    print("  Connect phone to BackpackScanner WiFi")
+    print("  Open http://10.42.0.1:5000")
     print("=" * 60)
     try:
         app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
     except KeyboardInterrupt:
         print("\n[App] Ctrl-C received, cleaning up...")
-        manager.emergency_cleanup()
+        _full_cleanup()
         sys.exit(0)
