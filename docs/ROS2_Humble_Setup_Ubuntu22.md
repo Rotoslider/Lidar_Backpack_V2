@@ -18,6 +18,9 @@ ROS 2 Humble (replacing the previous ROS 1 Noetic setup).
 9. [Configure FAST-LIO2 for Your Sensors](#9-configure-fast-lio2-for-your-sensors)
 10. [Launch and Verify](#10-launch-and-verify)
 11. [Troubleshooting](#11-troubleshooting)
+12. [WiFi Hotspot for Field Use](#12-wifi-hotspot-for-field-use)
+13. [Backpack Scanner Web App](#13-backpack-scanner-web-app)
+14. [FAST-LIO2 Backpack Modifications](#14-fast-lio2-backpack-modifications)
 
 ---
 
@@ -728,18 +731,77 @@ ros2 run tf2_tools view_frames
 
 ---
 
-## 12. Backpack Scanner Web App
+## 12. WiFi Hotspot for Field Use
+
+In the field (jungle, remote sites) there's no WiFi network for the phone to connect to.
+The backpack creates its own WiFi hotspot so the phone can connect directly.
+
+> **Note:** The LattePanda has one WiFi radio — it can either be a hotspot OR connect
+> to regular WiFi, not both. Use hotspot mode in the field, regular WiFi at home.
+
+### 12a. Create the hotspot (one-time setup)
+
+```bash
+nmcli device wifi hotspot ifname wlo1 ssid "BackpackScanner" password "scanforest"
+```
+
+This creates a saved connection profile called "Hotspot". Disable auto-start so it
+doesn't hijack your WiFi at home:
+
+```bash
+nmcli connection modify Hotspot connection.autoconnect no
+```
+
+Then reconnect to your normal WiFi:
+
+```bash
+nmcli device wifi connect "Big_starlink"
+```
+
+### 12b. Field usage
+
+Before heading into the field:
+
+```bash
+# Activate the hotspot
+nmcli connection up Hotspot
+```
+
+On your phone:
+1. Connect to WiFi network **BackpackScanner** (password: `scanforest`)
+2. Open **http://10.42.0.1:5000** in the browser
+
+> The backpack IP is always `10.42.0.1` in hotspot mode.
+
+### 12c. Back at home
+
+```bash
+# Turn off hotspot and reconnect to normal WiFi
+nmcli connection down Hotspot
+nmcli device wifi connect "Big_starlink"
+```
+
+### 12d. Quick reference
+
+| Mode | Command | Phone connects to | Scanner URL |
+|------|---------|-------------------|-------------|
+| Field (hotspot) | `nmcli connection up Hotspot` | BackpackScanner WiFi | http://10.42.0.1:5000 |
+| Home (WiFi) | `nmcli connection down Hotspot` | Same network as backpack | http://\<backpack-ip\>:5000 |
+
+---
+
+## 13. Backpack Scanner Web App
 
 The backpack scanner is a Flask web app (`backpack_scanner.py`) that controls the full
 scan lifecycle from a phone browser. It lives in `~/projects/Lidar_Backpack_V2/`.
 
-### 12a. Install Python dependencies
+### 13a. Install Python dependencies
 
 ```bash
 pip install flask smbus2
 ```
 
-### 12b. Run the app
+### 13b. Run the app
 
 ```bash
 cd ~/projects/Lidar_Backpack_V2
@@ -755,7 +817,7 @@ Open `http://<computer-ip>:5000` on your phone. The app manages:
 - Ouster standby mode on stop (saves power/heat)
 - Scan health monitoring with drift detection
 
-### 12c. Scan health monitor
+### 13c. Scan health monitor
 
 The app launches `scan_monitor.py` as a subprocess during scans. This is a lightweight
 ROS 2 node that subscribes to `/Odometry` and `/cloud_registered` to detect SLAM
@@ -775,7 +837,7 @@ Monitored metrics:
 > not pyenv's Python 3.11. ROS 2 Humble's `rclpy` C extensions require Python 3.10.
 > The app handles this automatically.
 
-### 12d. Output
+### 13d. Output
 
 Scans are saved to `~/pointclouds/<timestamp>_<lidar>/`:
 - `scan.pcd` — accumulated point cloud (saved on graceful stop)
@@ -786,7 +848,7 @@ For full documentation, see `docs/README_Backpack_Scanner.md`.
 
 ---
 
-## 13. FAST-LIO2 Backpack Modifications
+## 14. FAST-LIO2 Backpack Modifications
 
 Several modifications were made to the upstream FAST_LIO_ROS2 fork for backpack use.
 These are documented in detail in `~/ros2_ws/src/FAST_LIO_ROS2/CHANGES_BACKPACK.md`.
