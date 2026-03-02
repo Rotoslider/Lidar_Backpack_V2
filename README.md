@@ -9,20 +9,20 @@ motor control (Ouster), and real-time drift detection.
 ## Architecture
 
 ```
-Phone Browser (http://<ip>:5000)
+Phone Browser (http://10.42.0.1:5000)
         |
         | HTTP JSON API (polling every 2s)
         v
   backpack_scanner.py  (Flask, main process)
         |
         |-- subprocess: Lidar driver (Ouster or Livox ROS 2 node)
-        |-- subprocess: FAST-LIO2 (SLAM)
-        |-- subprocess: RViz2 (separate process group — killed cleanly on stop)
+        |-- subprocess: FAST-LIO2 (SLAM + RViz when display available)
         |-- subprocess: ros2 bag record
         |-- subprocess: scan_monitor.py (health monitor ROS 2 node)
         |
         +-- I2C: Miranda motor controller (Ouster only)
         +-- TCP:  Ouster standby control (port 7501)
+        +-- Hotspot watchdog (auto-restores WiFi AP if it drops)
 ```
 
 ### Key Design Decisions
@@ -36,10 +36,14 @@ Phone Browser (http://<ip>:5000)
   and serves to the phone. This avoids mixing ROS 2 context into the Flask process.
 
 - **Process group management.** All subprocesses are launched with `preexec_fn=os.setsid`
-  so they get their own process groups. RViz2 is launched in its own process group
-  (separate from FAST-LIO) so it can be killed cleanly without crashing. On stop,
-  the `/map_save` service is called while FAST-LIO is still running to save the PCD,
-  then SIGINT is sent to each group, with a SIGKILL fallback after 30 seconds.
+  so they get their own process groups. On stop, the `/map_save` service is called while
+  FAST-LIO is still running to save the PCD, then SIGINT is sent to each group, with a
+  SIGKILL escalation after 5 seconds. A `_cleanup_lock` prevents race conditions when
+  Stop and Force Stop are pressed in quick succession.
+
+- **Pre-flight checks.** Before launching any ROS process, the app pings the sensor and
+  checks disk space. Fails fast with a clear message instead of waiting 40 seconds for
+  a driver timeout.
 
 ---
 
@@ -51,62 +55,100 @@ Phone Browser (http://<ip>:5000)
 | `scan_monitor.py` | ROS 2 node — subscribes to `/Odometry` and `/cloud_registered`, writes health JSON |
 | `templates/index.html` | Phone-optimized web UI |
 | `backpack-scanner.service` | systemd unit file for autostart on boot |
+| `toggle_server.sh` | Desktop/GPIO script to start or stop the service |
+| `Backpack Scanner.desktop` | GNOME desktop shortcut (installed to `~/Desktop/`) |
+| `50-backpack-network.pkla` | PolicyKit rule for NetworkManager access from systemd |
+| `backpack-scanner-sudoers` | Sudoers rule for passwordless service start/stop |
 | `ouster_standby.json` | Ouster config for STANDBY mode (legacy, not currently used) |
 | `ouster_normal.json` | Ouster config for NORMAL mode (legacy, not currently used) |
 
 ---
 
-## Usage
+## Installation
 
-### Autostart (Headless)
-
-The app starts automatically on boot via a systemd service. Just power on the
-backpack computer, connect your phone to the **BackpackScanner** WiFi, and
-open `http://10.42.0.1:5000`.
+### First-Time Setup
 
 ```bash
-# Install/update the service (one-time, or after changing the .service file)
+# 1. Install the systemd service
 sudo cp ~/projects/Lidar_Backpack_V2/backpack-scanner.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable backpack-scanner.service
 
-# Useful commands
-sudo systemctl status backpack-scanner    # check if running
-sudo journalctl -u backpack-scanner -f    # tail logs live
-sudo systemctl stop backpack-scanner      # stop manually
-sudo systemctl restart backpack-scanner   # restart after code changes
+# 2. Install PolicyKit rule (allows service to manage WiFi hotspot)
+sudo cp ~/projects/Lidar_Backpack_V2/50-backpack-network.pkla \
+     /etc/polkit-1/localauthority/50-local.d/
+
+# 3. Install sudoers rule (passwordless service start/stop from desktop button)
+sudo cp ~/projects/Lidar_Backpack_V2/backpack-scanner-sudoers \
+     /etc/sudoers.d/backpack-scanner
+sudo chmod 440 /etc/sudoers.d/backpack-scanner
+
+# 4. Desktop shortcut is already at ~/Desktop/Backpack Scanner.desktop
+# Right-click → Allow Launching (if GNOME prompts)
 ```
 
-### Manual Start (for development/debugging)
+### After Code Changes
 
 ```bash
-cd ~/projects/Lidar_Backpack_V2
-python3 backpack_scanner.py
+# Restart the running service to pick up changes
+sudo systemctl restart backpack-scanner
 ```
 
-Open `http://<computer-ip>:5000` on your phone.
+### Network Configuration
+
+Both lidars connect through a single ethernet interface (`enp2s0`) with two addresses
+in one NetworkManager profile ("Lidar Backpack"):
+
+| Address | Subnet | Purpose |
+|---------|--------|---------|
+| `192.168.2.5` | `/24` | Livox MID-360 (static IP `192.168.2.183`) |
+| `169.254.1.1` | `/16` | Ouster OS0-32 (link-local, hostname `os-122134000147.local`) |
+
+This is a single persistent profile — both addresses come up together on every boot.
+The Ouster web interface is accessible at `http://os-122134000147.local/`.
+
+---
+
+## Usage
+
+### Starting the Scanner
+
+**Option A: Automatic (headless field use)**
+Power on the backpack. The service starts on boot, the WiFi hotspot comes up.
+Connect your phone to **BackpackScanner** WiFi and open `http://10.42.0.1:5000`.
+
+**Option B: Desktop button (with monitor)**
+Double-click **Backpack Scanner** on the desktop. A terminal shows the service
+starting and confirms the hotspot is active. Double-click again to stop.
+
+**Option C: Command line**
+```bash
+sudo systemctl start backpack-scanner    # start
+sudo systemctl stop backpack-scanner     # stop
+sudo systemctl status backpack-scanner   # check status
+journalctl -u backpack-scanner -f        # tail logs live
+```
 
 ### Scan Workflow
 
 1. **Select lidar** — tap Ouster OS0-32 or Livox MID-360
-2. **Start Scan** — the app launches processes in sequence:
+2. **Start Scan** — the app runs pre-flight checks then launches processes in sequence:
+   - Pre-flight: disk space check, sensor ping
    - Lidar driver (40s warmup for Ouster, 5s for Livox)
-   - FAST-LIO2 SLAM with RViz (5s warmup)
-   - Bag recording (raw packets for Ouster, point cloud for Livox)
+   - FAST-LIO2 SLAM (with RViz if display available, headless otherwise)
+   - Bag recording (raw packets for Ouster, point cloud + IMU for Livox)
    - Scan health monitor
    - Miranda motor at 20 RPM (Ouster only, after 10s FAST-LIO stabilization)
 3. **Monitor** — watch the Health indicator on your phone:
    - Green = healthy
    - Yellow = degraded (slow down, check environment)
    - Red = drift detected (stop and restart scan)
-4. **Stop Scan** — gracefully stops everything:
+4. **Stop Scan** — gracefully saves data and stops everything:
    - Ouster set to STANDBY (saves power/heat)
    - Motor stopped
-   - RViz2 killed (separate process, no data to save)
-   - PCD saved via `/map_save` ROS service (while FAST-LIO is still running)
-   - SIGINT to remaining ROS processes
-   - WiFi hotspot deactivated, previous WiFi restored
-   - Health file cleaned up
+   - PCD saved via `/map_save` ROS service
+   - PCD renamed with timestamp (e.g. `2026-03-02_14-30-00_ouster.pcd`)
+   - SIGINT to remaining ROS processes (SIGKILL escalation after 5s)
 
 ### Force Stop
 
@@ -115,7 +157,21 @@ processes immediately. FAST-LIO will NOT save a PCD file in this case.
 
 ### Exit
 
-Tap **Exit** to stop everything and shut down the Flask server.
+Tap **Exit** to stop everything, shut down the Flask server, and restore the previous
+WiFi connection. Use this when you want to connect the backpack to a local network
+(e.g. Starlink for file transfer).
+
+### WiFi Behavior
+
+| State | WiFi | Phone connects to |
+|-------|------|-------------------|
+| Service running | Hotspot (guarded by watchdog) | `BackpackScanner` WiFi → `http://10.42.0.1:5000` |
+| Service stopped / Exit pressed | Previous WiFi restored | Same network as backpack, use backpack's LAN IP |
+| Reboot | Hotspot auto-starts | `BackpackScanner` WiFi → `http://10.42.0.1:5000` |
+
+The hotspot watchdog checks every 15 seconds and re-enables the hotspot if it drops
+unexpectedly (e.g. NetworkManager glitch). It stops during clean shutdown so it
+doesn't fight the WiFi restore.
 
 ---
 
@@ -126,31 +182,9 @@ Tap **Exit** to stop everything and shut down the Flask server.
 | `/` | GET | Serve the web UI |
 | `/api/status` | GET | Current state, elapsed time, health data, messages |
 | `/api/start` | POST | Start scan. Body: `{"lidar": "ouster"}` or `{"lidar": "livox"}` |
-| `/api/stop` | POST | Graceful stop (SIGINT, saves PCD) |
+| `/api/stop` | POST | Graceful stop (saves PCD and bag) |
 | `/api/force_stop` | POST | Emergency kill (SIGKILL, no PCD save) |
 | `/api/exit` | POST | Stop everything and shut down server |
-
-### Status Response
-
-```json
-{
-  "state": "scanning",
-  "lidar": "ouster",
-  "elapsed": 145,
-  "output_dir": "/home/lapanda/pointclouds/2026-03-01_14-30-00_ouster",
-  "message": "Scanning — check rviz for live point cloud",
-  "health": {
-    "status": "ok",
-    "message": "Scan healthy",
-    "pos_cov": 0.0012,
-    "rot_cov": 0.0001,
-    "speed": 0.45,
-    "points": 3842,
-    "msg_rate": 10.2,
-    "timestamp": 1709312400.0
-  }
-}
-```
 
 ---
 
@@ -161,18 +195,13 @@ Tap **Exit** to stop everything and shut down the Flask server.
 The monitor subscribes to two FAST-LIO topics:
 
 **`/Odometry` (nav_msgs/Odometry)** — EKF state output at ~10-20 Hz
-- **Position covariance** — diagonal elements [0,7,14] of the 6x6 pose covariance matrix.
-  Represents XYZ position uncertainty from the EKF. Grows when SLAM degrades.
-- **Rotation covariance** — diagonal elements [21,28,35]. Rotation uncertainty.
-- **Velocity** — computed from position deltas between messages. Detects impossible speeds
-  that indicate the EKF state has jumped.
-- **Position jumps** — raw displacement per odometry step. Catches sudden re-localization
-  failures (e.g., 1-meter shift when sensor recovers from occlusion).
+- **Position covariance** — diagonal elements [0,7,14] of the 6x6 pose covariance matrix
+- **Rotation covariance** — diagonal elements [21,28,35]
+- **Velocity** — computed from position deltas between messages
+- **Position jumps** — raw displacement per odometry step
 
 **`/cloud_registered` (sensor_msgs/PointCloud2)** — registered point cloud
-- **Point count** — `width * height` of each cloud message. This is the most direct
-  measure of SLAM input quality. When the sensor is blocked, covered, or in a
-  featureless environment, the point count drops to near-zero.
+- **Point count** — `width * height` of each cloud message
 
 ### Health Status Levels
 
@@ -191,18 +220,8 @@ The monitor subscribes to two FAST-LIO topics:
 | Rotation covariance | > 0.1 | > 0.5 | EKF uncertainty in radians^2 |
 | Speed | > 3.0 m/s | > 8.0 m/s | Walking ~1.5 m/s, running ~3 m/s |
 | Position jump | > 0.3m | > 0.8m | Single-step displacement |
-| Point count | < 50 | < 10 | Per-frame registered points |
+| Point count | < 50 | < 10 | Per-frame registered points (3 consecutive) |
 | Message timeout | — | > 3s | No odometry = SLAM crashed |
-
-Point count warnings require 3 consecutive low-count frames to avoid single-frame flicker.
-
-### How It Works
-
-1. Callbacks update metric values on every message
-2. A 1 Hz timer evaluates all metrics against thresholds
-3. Status is written atomically to `/tmp/scan_health.json` (write to temp, then `os.replace`)
-4. Flask reads the JSON file when the phone polls `/api/status`
-5. File staleness > 5 seconds triggers "unknown" status
 
 ### Important: System Python Requirement
 
@@ -212,15 +231,33 @@ ROS 2 Humble's `rclpy` C extensions are built for Python 3.10. The launch comman
 
 ---
 
+## Output Directory Structure
+
+Each scan creates a timestamped directory under `~/pointclouds/`:
+
+```
+~/pointclouds/2026-03-02_14-30-00_ouster/
+  2026-03-02_14-30-00_ouster.pcd   # FAST-LIO point cloud (timestamped name)
+  bag/                              # ROS 2 bag with raw sensor data
+    metadata.yaml
+    *.db3
+  os-122134000147-metadata.json     # Ouster sensor metadata (if available)
+```
+
+The bag contains raw packets (Ouster) or raw point cloud + IMU (Livox), allowing
+offline reprocessing with different FAST-LIO parameters.
+
+---
+
 ## Motor Controller
 
 The Miranda motor rotates the Ouster lidar at 20 RPM for 360-degree scanning.
 
 - Connected via CH341 USB-to-I2C adapter (auto-detected at startup)
-- I2C address: `0x28`
+- I2C address: `0x28`, device group: `ch341` (user `lapanda` has access)
 - RPM-to-counts conversion: `counts = RPM * 6 * 91.019`
 - Motor starts 10 seconds after FAST-LIO to allow initial map stabilization
-- Motor stops immediately on scan stop
+- Motor stops immediately on scan stop or abort
 
 If the CH341 adapter is not found, the app starts without motor control (useful for
 Livox-only operation or bench testing).
@@ -243,37 +280,20 @@ this automatically during its initialization.
 
 ---
 
-## Output Directory Structure
-
-Each scan creates a timestamped directory under `~/pointclouds/`:
-
-```
-~/pointclouds/2026-03-01_14-30-00_ouster/
-  scan.pcd              # FAST-LIO accumulated point cloud (saved on graceful stop)
-  bag/                  # ROS 2 bag with raw sensor data
-    metadata.yaml
-    *.db3
-  os-122134000147-metadata.json   # Ouster sensor metadata (if available)
-```
-
-The bag contains raw packets (Ouster) or raw point cloud + IMU (Livox), allowing
-offline reprocessing with different FAST-LIO parameters.
-
----
-
 ## Troubleshooting
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
+| "Cannot reach sensor" on scan start | Sensor not powered or cable disconnected | Check power and ethernet. Ping `os-122134000147.local` (Ouster) or `192.168.2.183` (Livox) |
+| "Low disk space" on scan start | Disk full | Free space on the pointclouds partition (need 1 GB minimum) |
+| "Driver process died during startup" | ROS driver crashed | Check `journalctl -u backpack-scanner` for driver errors |
 | Health shows "No health data" | Monitor failed to start (Python version mismatch) | Verify `/usr/bin/python3 -c "import rclpy"` works with ROS 2 sourced |
 | Health shows "Waiting for odometry data..." | FAST-LIO hasn't started publishing yet | Wait for FAST-LIO initialization (normal during startup) |
-| Health stays green when sensor is blocked | Point count detection not working | Check that `/cloud_registered` topic is publishing (`ros2 topic hz /cloud_registered`) |
 | Motor doesn't spin | CH341 adapter not detected or I2C error | Check `i2cdetect -l` for CH341 bus, verify wiring |
-| Ouster won't wake from standby | Sensor hostname wrong or network issue | Ping `os-122134000147.local`, check ethernet connection |
 | PCD file not saved | Used Force Stop instead of Stop | Force Stop sends SIGKILL — use normal Stop for PCD save |
-| App doesn't start on boot | systemd service not installed/enabled | Run the install commands in the Autostart section above |
-| WiFi hotspot stays on after exit | Cleanup failed | `nmcli connection down Hotspot` then `nmcli device connect wlan0` |
-| Scan directory empty | FAST-LIO crashed during scan | Check terminal for FAST-LIO errors, review health history |
+| Hotspot doesn't start | PolicyKit rule not installed | Install `50-backpack-network.pkla` (see Installation above) |
+| Can't delete old scan folders | Files owned by root (from old service config) | `sudo chown -R lapanda:lapanda ~/pointclouds/<folder>` |
+| WiFi hotspot stays on after exit | Cleanup failed | `nmcli connection down Hotspot` then `nmcli device connect wlo1` |
 
 ---
 
@@ -292,11 +312,6 @@ SPEED_WARN = 3.0      # m/s — warning velocity
 SPEED_ERROR = 8.0     # m/s — error velocity
 ```
 
-These are conservative initial values. After field testing, you may want to:
-- Lower `POINTS_WARN` if your environment naturally has sparse features
-- Adjust `SPEED_WARN` based on typical walking speed with the backpack
-- Tune covariance thresholds based on observed values during good scans
-
 ### Changing Motor Speed
 
 In `backpack_scanner.py`, the motor speed is set in `_start_scan_sequence()`:
@@ -305,12 +320,12 @@ In `backpack_scanner.py`, the motor speed is set in `_start_scan_sequence()`:
 self.motor.start_motor(20)  # RPM
 ```
 
-### Changing Polling Interval
+### Changing Minimum Disk Space
 
-In `templates/index.html`, the status polling interval:
+In `backpack_scanner.py`:
 
-```javascript
-setInterval(updateStatus, 2000);  // milliseconds
+```python
+MIN_DISK_MB = 1024  # Minimum free disk space (MB) to start a scan
 ```
 
 ---

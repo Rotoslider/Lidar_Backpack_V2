@@ -317,7 +317,9 @@ function updateStatus() {
 
       document.getElementById('statusLidar').textContent = data.lidar;
       document.getElementById('statusElapsed').textContent = formatElapsed(data.elapsed);
-      document.getElementById('statusOutput').textContent = data.output_dir || '\u2014';
+      // Show only the folder name, not the full path
+      const outDir = data.output_dir ? data.output_dir.split('/').pop() : '\u2014';
+      document.getElementById('statusOutput').textContent = outDir;
 
       // Update message banner
       const msgBox = document.getElementById('messageBox');

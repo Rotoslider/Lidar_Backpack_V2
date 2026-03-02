@@ -3,15 +3,27 @@ Description=Lidar Backpack Scanner
 After=network-online.target NetworkManager.service
 Wants=network-online.target
 
+# Give link-local / sensor discovery time to settle after boot
+After=NetworkManager-wait-online.service
+
 [Service]
 Type=simple
+User=lapanda
+Group=lapanda
 Environment=HOME=/home/lapanda
 Environment=PYENV_ROOT=/home/lapanda/.pyenv
 Environment=PATH=/home/lapanda/.pyenv/versions/3.11.9/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WorkingDirectory=/home/lapanda/projects/Lidar_Backpack_V2
+
+# Wait for network interfaces to fully settle (link-local negotiation)
+ExecStartPre=/bin/sleep 5
+
 ExecStart=/home/lapanda/.pyenv/versions/3.11.9/bin/python3 backpack_scanner.py
 Restart=on-failure
 RestartSec=5
+
+# Ensure clean shutdown — give scan stop sequence time to save PCD
+TimeoutStopSec=45
 
 [Install]
 WantedBy=multi-user.target

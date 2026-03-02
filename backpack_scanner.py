@@ -18,6 +18,12 @@ from pathlib import Path
 from flask import Flask, render_template, jsonify, request
 
 # ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+MIN_DISK_MB = 1024  # Minimum free disk space (MB) to start a scan
+
+# ---------------------------------------------------------------------------
 # Motor Controller (reused from v0.2 — Miranda I2C control)
 # ---------------------------------------------------------------------------
 
@@ -102,6 +108,7 @@ class LidarManager:
         self.last_elapsed = None  # Preserved after stop for reference
         self.motor = MotorController()
         self.lock = threading.Lock()
+        self._cleanup_lock = threading.Lock()  # Prevent concurrent cleanup races
         self._fastlio_proc = None  # Reference to FAST-LIO for PCD save
 
         # Paths
@@ -121,15 +128,22 @@ class LidarManager:
         """Check if we're in a state where the scan sequence should continue."""
         return self.state in (self.STARTING, self.SCANNING)
 
-    def _wait_countdown(self, seconds, msg_template):
+    def _wait_countdown(self, seconds, msg_template, watch_proc=None):
         """Wait with a countdown, checking for abort each second.
         msg_template should contain {remaining} placeholder.
+        If watch_proc is given, abort if that process exits early.
         Returns True if completed, False if aborted."""
         for remaining in range(seconds, 0, -1):
             if not self._is_active():
                 return False
+            if watch_proc and watch_proc.poll() is not None:
+                self._set_message("Driver process died during startup")
+                return False
             self._set_message(msg_template.format(remaining=remaining))
             time.sleep(1)
+        if watch_proc and watch_proc.poll() is not None:
+            self._set_message("Driver process died during startup")
+            return False
         return self._is_active()
 
     # Health monitoring
@@ -174,8 +188,99 @@ class LidarManager:
         thread.start()
         return True, "Scan starting..."
 
+    def _preflight_check(self):
+        """Run pre-flight checks before starting a scan.
+        Returns (ok, error_message)."""
+
+        # 1. Check disk space
+        self._set_message("Checking disk space...")
+        try:
+            stat = os.statvfs(str(self.pointclouds_dir))
+            free_mb = (stat.f_bavail * stat.f_frsize) / (1024 * 1024)
+            if free_mb < MIN_DISK_MB:
+                return False, f"Low disk space: {free_mb:.0f} MB free (need {MIN_DISK_MB} MB)"
+            print(f"[Preflight] Disk space OK: {free_mb:.0f} MB free")
+        except OSError as e:
+            return False, f"Cannot check disk space: {e}"
+
+        # 2. Check sensor reachability
+        if self.lidar_type == "ouster":
+            host = self.ouster_hostname
+        else:
+            host = "192.168.2.183"
+
+        self._set_message(f"Checking {self.lidar_type} sensor connectivity...")
+        try:
+            result = subprocess.run(
+                ["ping", "-c", "1", "-W", "3", host],
+                capture_output=True, timeout=5,
+            )
+            if result.returncode != 0:
+                return False, (
+                    f"Cannot reach {self.lidar_type} sensor at {host} — "
+                    f"check cable and power"
+                )
+            print(f"[Preflight] Sensor {host} reachable")
+        except subprocess.TimeoutExpired:
+            return False, f"Sensor ping timed out for {host} — check network"
+        except Exception as e:
+            return False, f"Connectivity check failed: {e}"
+
+        return True, ""
+
+    def _kill_all_processes(self, sig=signal.SIGKILL):
+        """Kill all tracked processes. Safe to call from any thread."""
+        with self._cleanup_lock:
+            procs = list(self.processes)  # Snapshot under lock
+
+        for proc in procs:
+            try:
+                os.killpg(os.getpgid(proc.pid), sig)
+            except (ProcessLookupError, OSError):
+                pass
+
+        for proc in procs:
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # Escalate to SIGKILL if SIGINT didn't work
+                if sig != signal.SIGKILL:
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except (ProcessLookupError, OSError):
+                        pass
+
+        with self._cleanup_lock:
+            self.processes.clear()
+            self._fastlio_proc = None
+
+    def _abort_startup(self, reason):
+        """Clean up after a failed or aborted startup sequence."""
+        print(f"[Scan] Startup aborted: {reason}")
+        self._set_message(f"Aborted: {reason}")
+
+        # Stop motor if it was started
+        try:
+            self.motor.stop_motor()
+        except Exception:
+            pass
+
+        self._kill_all_processes()
+
+        with self.lock:
+            self.state = self.IDLE
+
     def _start_scan_sequence(self):
         try:
+            # Pre-flight checks
+            ok, err = self._preflight_check()
+            if not ok:
+                self._abort_startup(err)
+                return
+            if not self._is_active():
+                self._abort_startup("Cancelled by user")
+                return
+
             # Create timestamped output directory
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             self.output_dir = self.pointclouds_dir / f"{timestamp}_{self.lidar_type}"
@@ -206,12 +311,20 @@ class LidarManager:
             )
             self.processes.append(driver_proc)
 
-            # Wait for driver to initialize
+            # Wait for driver to initialize (watch for early crash)
             if self.lidar_type == "ouster":
-                if not self._wait_countdown(40, "Ouster driver initializing ({remaining}s)..."):
+                if not self._wait_countdown(
+                    40, "Ouster driver initializing ({remaining}s)...",
+                    watch_proc=driver_proc,
+                ):
+                    self._abort_startup("Driver failed or cancelled during init")
                     return
             else:
-                if not self._wait_countdown(5, "Livox driver initializing ({remaining}s)..."):
+                if not self._wait_countdown(
+                    5, "Livox driver initializing ({remaining}s)...",
+                    watch_proc=driver_proc,
+                ):
+                    self._abort_startup("Driver failed or cancelled during init")
                     return
 
             # 2. Launch FAST-LIO (without rviz — launched separately to avoid SIGSEGV)
@@ -243,7 +356,11 @@ class LidarManager:
             self.processes.append(fastlio_proc)
             self._fastlio_proc = fastlio_proc
 
-            if not self._wait_countdown(5, "FAST-LIO initializing ({remaining}s)..."):
+            if not self._wait_countdown(
+                5, "FAST-LIO initializing ({remaining}s)...",
+                watch_proc=fastlio_proc,
+            ):
+                self._abort_startup("FAST-LIO failed or cancelled during init")
                 return
 
             # 3. Start bag recording
@@ -280,6 +397,7 @@ class LidarManager:
             # 4. Delay motor start so FAST-LIO builds initial map first
             if self.lidar_type == "ouster":
                 if not self._wait_countdown(10, "FAST-LIO stabilizing, motor in {remaining}s..."):
+                    self._abort_startup("Cancelled during motor delay")
                     return
                 self._set_message("Starting Miranda motor...")
                 self.motor.start_motor(20)
@@ -295,9 +413,7 @@ class LidarManager:
 
         except Exception as e:
             print(f"[Scan] Error during startup: {e}")
-            self._set_message(f"Error: {e}")
-            with self.lock:
-                self.state = self.IDLE
+            self._abort_startup(str(e))
 
     def _copy_ouster_metadata(self):
         """Copy the Ouster sensor metadata JSON to the output directory."""
@@ -340,35 +456,19 @@ class LidarManager:
             self._set_message("Saving PCD map...")
             self._call_map_save()
 
+            # 3b. Rename PCD with timestamp
+            self._rename_pcd()
+
             # 4. Kill rviz2 before SIGINT (prevents SIGSEGV crash noise)
             subprocess.run(
                 ["pkill", "-9", "rviz2"],
                 capture_output=True, timeout=3,
             )
 
-            # 5. SIGINT remaining ROS processes
+            # 5. Graceful SIGINT, then SIGKILL stragglers
             self._set_message("Stopping ROS processes...")
-            for proc in self.processes:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGINT)
-                except (ProcessLookupError, OSError):
-                    pass
+            self._kill_all_processes(sig=signal.SIGINT)
 
-            # 6. Wait for exit
-            self._set_message("Waiting for processes to exit...")
-            deadline = time.time() + 30
-            for proc in self.processes:
-                remaining = max(0.1, deadline - time.time())
-                try:
-                    proc.wait(timeout=remaining)
-                except subprocess.TimeoutExpired:
-                    print(f"[Stop] Process {proc.pid} didn't exit, sending SIGKILL...")
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except (ProcessLookupError, OSError):
-                        pass
-
-            self.processes.clear()
             if self.scan_start_time:
                 self.last_elapsed = int(time.time() - self.scan_start_time)
             self.scan_start_time = None
@@ -379,7 +479,7 @@ class LidarManager:
             except OSError:
                 pass
 
-            self._set_message(f"Scan saved to {self.output_dir}")
+            self._set_message(f"Scan saved to {self.output_dir.name}")
 
         except Exception as e:
             print(f"[Stop] Error during shutdown: {e}")
@@ -391,14 +491,12 @@ class LidarManager:
     def force_stop(self):
         """Emergency kill — always works regardless of state."""
         self._set_message("Force stopping all processes...")
-        self.motor.stop_motor()
+        try:
+            self.motor.stop_motor()
+        except Exception:
+            pass
         self._set_ouster_standby()
-        for proc in self.processes:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                pass
-        self.processes.clear()
+        self._kill_all_processes()
         if self.scan_start_time:
             self.last_elapsed = int(time.time() - self.scan_start_time)
         self.scan_start_time = None
@@ -427,6 +525,24 @@ class LidarManager:
         except Exception as e:
             print(f"[Scan] /map_save service error: {e}")
 
+    def _rename_pcd(self):
+        """Rename scan.pcd to include the timestamp matching the output folder."""
+        if not self.output_dir:
+            return
+        src = self.output_dir / "scan.pcd"
+        if not src.exists():
+            print("[Scan] No scan.pcd found to rename")
+            return
+        try:
+            # Extract timestamp from output dir name (e.g. "2026-03-02_14-30-00_ouster")
+            folder_name = self.output_dir.name
+            new_name = f"{folder_name}.pcd"
+            dst = self.output_dir / new_name
+            src.rename(dst)
+            print(f"[Scan] Renamed PCD: {src.name} -> {new_name}")
+        except Exception as e:
+            print(f"[Scan] Failed to rename PCD: {e}")
+
     def _set_ouster_standby(self):
         """Best-effort attempt to put Ouster into STANDBY mode."""
         try:
@@ -449,11 +565,7 @@ class LidarManager:
             self._set_ouster_standby()
         except Exception:
             pass
-        for proc in self.processes:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                pass
+        self._kill_all_processes()
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +633,22 @@ def api_exit():
 _previous_wifi = None
 
 
+def _get_wifi_device():
+    """Auto-detect the WiFi device name (e.g. wlo1, wlan0)."""
+    try:
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "DEVICE,TYPE", "device"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.strip().splitlines():
+            parts = line.split(":")
+            if len(parts) >= 2 and parts[1] == "wifi":
+                return parts[0]
+    except Exception:
+        pass
+    return "wlo1"  # Fallback to known device
+
+
 def _start_hotspot():
     """Activate the BackpackScanner hotspot, saving the current WiFi connection."""
     global _previous_wifi
@@ -551,9 +679,41 @@ def _start_hotspot():
         print("[Hotspot] Continuing without hotspot.")
 
 
+def _is_hotspot_active():
+    """Check if the Hotspot connection is currently active."""
+    try:
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "NAME", "connection", "show", "--active"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return "Hotspot" in result.stdout.strip().splitlines()
+    except Exception:
+        return False
+
+
+_hotspot_watchdog_stop = threading.Event()
+
+
+def _hotspot_watchdog():
+    """Background thread: re-enable hotspot if it drops while the app is running."""
+    while not _hotspot_watchdog_stop.wait(timeout=15):
+        if not _is_hotspot_active():
+            print("[Hotspot] Watchdog: hotspot dropped, re-enabling...")
+            result = subprocess.run(
+                ["nmcli", "connection", "up", "Hotspot"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                print("[Hotspot] Watchdog: hotspot restored")
+            else:
+                print(f"[Hotspot] Watchdog: restore failed: {result.stderr.strip()}")
+
+
 def _stop_hotspot():
     """Deactivate hotspot and restore previous WiFi connection."""
     try:
+        wifi_dev = _get_wifi_device()
+
         # Bring down the hotspot connection
         result = subprocess.run(
             ["nmcli", "connection", "down", "Hotspot"],
@@ -563,7 +723,7 @@ def _stop_hotspot():
             print(f"[Hotspot] 'down' failed: {result.stderr.strip()}")
             # Fallback: disconnect the wifi device directly
             subprocess.run(
-                ["nmcli", "device", "disconnect", "wlan0"],
+                ["nmcli", "device", "disconnect", wifi_dev],
                 capture_output=True, text=True, timeout=10,
             )
         time.sleep(1)
@@ -583,7 +743,7 @@ def _stop_hotspot():
                     capture_output=True, text=True, timeout=10,
                 )
                 subprocess.run(
-                    ["nmcli", "device", "connect", "wlan0"],
+                    ["nmcli", "device", "connect", wifi_dev],
                     capture_output=True, text=True, timeout=15,
                 )
                 print("[Hotspot] Triggered WiFi reconnect via device connect.")
@@ -594,7 +754,7 @@ def _stop_hotspot():
                 capture_output=True, text=True, timeout=10,
             )
             subprocess.run(
-                ["nmcli", "device", "connect", "wlan0"],
+                ["nmcli", "device", "connect", wifi_dev],
                 capture_output=True, text=True, timeout=15,
             )
             print("[Hotspot] Hotspot stopped, triggered WiFi auto-connect.")
@@ -610,8 +770,19 @@ if __name__ == "__main__":
     # Start WiFi hotspot for phone access
     _start_hotspot()
 
-    # Register cleanup so motor/lidar/hotspot stop on any exit
+    # Start watchdog to auto-restore hotspot if it gets knocked off
+    _wd_thread = threading.Thread(target=_hotspot_watchdog, daemon=True)
+    _wd_thread.start()
+
+    # Register cleanup so motor/lidar/hotspot stop on any exit.
+    # Use a mutable flag to prevent double-cleanup (signal handler + atexit).
+    _cleanup_done = [False]
+
     def _full_cleanup():
+        if _cleanup_done[0]:
+            return
+        _cleanup_done[0] = True
+        _hotspot_watchdog_stop.set()
         manager.emergency_cleanup()
         _stop_hotspot()
 
@@ -620,7 +791,7 @@ if __name__ == "__main__":
     def _signal_handler(signum, frame):
         print(f"\n[Signal] Caught signal {signum}, cleaning up...")
         _full_cleanup()
-        sys.exit(1)
+        sys.exit(0)  # Clean exit — not a crash
 
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGHUP, _signal_handler)

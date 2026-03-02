@@ -1,0 +1,6 @@
+[Allow backpack scanner to manage networking]
+Identity=unix-user:lapanda
+Action=org.freedesktop.NetworkManager.*
+ResultAny=yes
+ResultInactive=yes
+ResultActive=yes
