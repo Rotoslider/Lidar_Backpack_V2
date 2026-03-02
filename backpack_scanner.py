@@ -626,6 +626,37 @@ def api_exit():
     return jsonify({"ok": True, "msg": "Server shutting down..."})
 
 
+@app.route("/api/shutdown", methods=["POST"])
+def api_shutdown():
+    """Stop scan, clean up, and power off the computer."""
+    # 1. Stop any active scan gracefully
+    if manager.state in (manager.STARTING, manager.SCANNING):
+        manager.stop_scan()
+        # Wait for stop sequence to finish (PCD save, bag flush)
+        deadline = time.time() + 45
+        while manager.state != manager.IDLE and time.time() < deadline:
+            time.sleep(1)
+    elif manager.state == manager.STOPPING:
+        deadline = time.time() + 45
+        while manager.state != manager.IDLE and time.time() < deadline:
+            time.sleep(1)
+
+    # 2. Force stop if graceful stop didn't finish
+    if manager.state != manager.IDLE:
+        manager.force_stop()
+
+    def _do_shutdown():
+        time.sleep(2)
+        print("[App] Shutting down computer...")
+        manager.emergency_cleanup()
+        _stop_hotspot()
+        subprocess.run(["sudo", "shutdown", "-h", "now"],
+                       capture_output=True, timeout=10)
+
+    threading.Thread(target=_do_shutdown, daemon=True).start()
+    return jsonify({"ok": True, "msg": "Computer shutting down..."})
+
+
 # ---------------------------------------------------------------------------
 # WiFi Hotspot Management
 # ---------------------------------------------------------------------------

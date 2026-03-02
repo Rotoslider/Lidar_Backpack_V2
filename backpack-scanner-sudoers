@@ -3,3 +3,6 @@ lapanda ALL=(root) NOPASSWD: /usr/bin/systemctl start backpack-scanner.service
 lapanda ALL=(root) NOPASSWD: /usr/bin/systemctl stop backpack-scanner.service
 lapanda ALL=(root) NOPASSWD: /usr/bin/systemctl restart backpack-scanner.service
 lapanda ALL=(root) NOPASSWD: /usr/bin/systemctl status backpack-scanner.service
+
+# Allow lapanda to shut down the computer (for phone UI shutdown button)
+lapanda ALL=(root) NOPASSWD: /usr/sbin/shutdown

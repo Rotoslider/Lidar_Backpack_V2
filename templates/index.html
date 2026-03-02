@@ -107,6 +107,14 @@
     padding: 16px;
   }
   .btn-exit:not(:disabled):hover { background: #444; }
+  .btn-shutdown {
+    background: #4a1a1a;
+    color: #f44336;
+    font-size: 1.1rem;
+    padding: 16px;
+    flex: 0 0 auto;
+  }
+  .btn-shutdown:not(:disabled):hover { background: #5a2222; }
 
   /* Status area */
   .status-box {
@@ -244,8 +252,9 @@
 </div>
 
 <!-- Exit -->
-<div class="section">
-  <button class="action-btn btn-exit" id="btnExit" onclick="exitApp()">Exit</button>
+<div class="section" style="display: flex; gap: 12px;">
+  <button class="action-btn btn-exit" id="btnExit" onclick="exitApp()" style="flex:1;">Exit</button>
+  <button class="action-btn btn-shutdown" id="btnShutdown" onclick="shutdownComputer()">Shutdown</button>
 </div>
 
 <script>
@@ -299,6 +308,20 @@ function forceStop() {
 function exitApp() {
   if (!confirm('Stop everything and shut down the server?')) return;
   api('/api/exit', 'POST').catch(() => {});
+}
+
+function shutdownComputer() {
+  if (!confirm('SHUTDOWN COMPUTER?\n\nThis will stop all scans, save data, and power off the backpack computer. You will need physical access to turn it back on.')) return;
+  if (!confirm('Are you sure? The computer will power off.')) return;
+  api('/api/shutdown', 'POST')
+    .then(data => {
+      if (data.ok) {
+        document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#aaa;font-size:1.5rem;text-align:center;padding:20px;">Computer is shutting down.<br>Safe to disconnect power in 30 seconds.</div>';
+      } else {
+        alert(data.msg);
+      }
+    })
+    .catch(() => {});
 }
 
 function formatElapsed(seconds) {
