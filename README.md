@@ -58,7 +58,7 @@ Phone Browser (http://10.42.0.1:5000)
 | `toggle_server.sh` | Desktop/GPIO script to start or stop the service |
 | `Backpack Scanner.desktop` | GNOME desktop shortcut (installed to `~/Desktop/`) |
 | `50-backpack-network.pkla` | PolicyKit rule for NetworkManager access from systemd |
-| `backpack-scanner-sudoers` | Sudoers rule for passwordless service start/stop |
+| `backpack-scanner-sudoers` | Sudoers rule for passwordless service start/stop and computer shutdown |
 | `ouster_standby.json` | Ouster config for STANDBY mode (legacy, not currently used) |
 | `ouster_normal.json` | Ouster config for NORMAL mode (legacy, not currently used) |
 
@@ -143,12 +143,13 @@ journalctl -u backpack-scanner -f        # tail logs live
    - Green = healthy
    - Yellow = degraded (slow down, check environment)
    - Red = drift detected (stop and restart scan)
-4. **Stop Scan** — gracefully saves data and stops everything:
-   - Ouster set to STANDBY (saves power/heat)
-   - Motor stopped
-   - PCD saved via `/map_save` ROS service
-   - PCD renamed with timestamp (e.g. `2026-03-02_14-30-00_ouster.pcd`)
-   - SIGINT to remaining ROS processes (SIGKILL escalation after 5s)
+4. **Stop Scan** — gracefully saves data and stops everything. Activity shows
+   each step as it happens:
+   - Ouster set to STANDBY, motor stopped
+   - Saving PCD... → Saved PCD (renamed with timestamp)
+   - Saving bag... → Saved bag
+   - Saved metadata
+   - Scan complete
 
 ### Force Stop
 
@@ -160,6 +161,13 @@ processes immediately. FAST-LIO will NOT save a PCD file in this case.
 Tap **Exit** to stop everything, shut down the Flask server, and restore the previous
 WiFi connection. Use this when you want to connect the backpack to a local network
 (e.g. Starlink for file transfer).
+
+### Shutdown
+
+Tap **Shutdown** to power off the backpack computer. Requires two confirmations.
+If a scan is running, it is stopped gracefully first (PCD and bag saved, motor stopped)
+before the computer powers off. The phone displays "Safe to disconnect power in 30
+seconds." You will need physical access to the power button to turn the computer back on.
 
 ### WiFi Behavior
 
@@ -185,6 +193,7 @@ doesn't fight the WiFi restore.
 | `/api/stop` | POST | Graceful stop (saves PCD and bag) |
 | `/api/force_stop` | POST | Emergency kill (SIGKILL, no PCD save) |
 | `/api/exit` | POST | Stop everything and shut down server |
+| `/api/shutdown` | POST | Graceful stop, cleanup, and power off computer |
 
 ---
 
