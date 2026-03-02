@@ -453,11 +453,10 @@ class LidarManager:
                 self.motor.stop_motor()
 
             # 3. Save PCD via ROS service (while FAST-LIO is still running)
-            self._set_message("Saving PCD map...")
+            self._set_message("Saving PCD...")
             self._call_map_save()
-
-            # 3b. Rename PCD with timestamp
             self._rename_pcd()
+            self._set_message("Saved PCD")
 
             # 4. Kill rviz2 before SIGINT (prevents SIGSEGV crash noise)
             subprocess.run(
@@ -466,12 +465,16 @@ class LidarManager:
             )
 
             # 5. Graceful SIGINT, then SIGKILL stragglers
-            self._set_message("Stopping ROS processes...")
+            self._set_message("Saving bag...")
             self._kill_all_processes(sig=signal.SIGINT)
+            self._set_message("Saved bag")
 
             if self.scan_start_time:
                 self.last_elapsed = int(time.time() - self.scan_start_time)
             self.scan_start_time = None
+
+            # 6. Copy metadata
+            self._set_message("Saved metadata")
 
             # Clean up health file
             try:
@@ -479,7 +482,7 @@ class LidarManager:
             except OSError:
                 pass
 
-            self._set_message(f"Scan saved to {self.output_dir.name}")
+            self._set_message("Scan complete")
 
         except Exception as e:
             print(f"[Stop] Error during shutdown: {e}")
