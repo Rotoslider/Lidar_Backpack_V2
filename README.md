@@ -302,6 +302,7 @@ this automatically during its initialization.
 | PCD file not saved | Used Force Stop instead of Stop | Force Stop sends SIGKILL — use normal Stop for PCD save |
 | Hotspot doesn't start | PolicyKit rule not installed | Install `50-backpack-network.pkla` (see Installation above) |
 | Can't delete old scan folders | Files owned by root (from old service config) | `sudo chown -R lapanda:lapanda ~/pointclouds/<folder>` |
+| Shutdown button doesn't power off | Sudoers file not installed or outdated | Re-install: `sudo install -m 440 -o root -g root backpack-scanner-sudoers /etc/sudoers.d/backpack-scanner` |
 | WiFi hotspot stays on after exit | Cleanup failed | `nmcli connection down Hotspot` then `nmcli device connect wlo1` |
 
 ---
