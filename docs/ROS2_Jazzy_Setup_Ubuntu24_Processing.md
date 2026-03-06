@@ -20,7 +20,7 @@ hardware, no motor, no hotspot needed.
 ## Table of Contents
 
 1. [Prerequisites](#1-prerequisites)
-2. [Install pyenv and Python 3.11](#2-install-pyenv-and-python-311)
+2. [Install Python Dependencies](#2-install-python-dependencies)
 3. [Install ROS 2 Jazzy](#3-install-ros-2-jazzy)
 4. [Create the Colcon Workspace](#4-create-the-colcon-workspace)
 5. [Install System Dependencies](#5-install-system-dependencies)
@@ -43,41 +43,13 @@ hardware, no motor, no hotspot needed.
 
 ---
 
-## 2. Install pyenv and Python 3.11
+## 2. Install Python Dependencies
 
-The reprocessor GUI (`fastlio_reprocessor.py`) uses PyQt5 which works best under
-Python 3.11. System Python 3.12 is used for ROS 2.
-
-Install build dependencies:
+Ubuntu 24.04 ships with Python 3.12 which works with both ROS 2 Jazzy and the
+reprocessor GUI. No need for pyenv or alternate Python versions.
 
 ```bash
-sudo apt-get install -y build-essential libssl-dev zlib1g-dev libbz2-dev \
-  libreadline-dev libsqlite3-dev wget curl llvm libncurses5-dev libncursesw5-dev \
-  xz-utils tk-dev libffi-dev liblzma-dev python3-openssl git
-```
-
-Install pyenv:
-
-```bash
-curl https://pyenv.run | bash
-```
-
-Add to `~/.bashrc`:
-
-```bash
-export PYENV_ROOT="$HOME/.pyenv"
-[[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"
-eval "$(pyenv init - bash)"
-eval "$(pyenv virtualenv-init -)"
-```
-
-Then:
-
-```bash
-source ~/.bashrc
-pyenv install 3.11.9
-pyenv global 3.11.9
-python3 --version   # should show 3.11.9
+sudo apt install -y python3-pip python3-venv python3-dev git
 ```
 
 ---
@@ -154,18 +126,6 @@ source install/setup.bash
 echo "source ~/ros2_ws/install/setup.bash" >> ~/.bashrc
 source ~/.bashrc
 ```
-
-### 4a. Fix pyenv / ROS 2 Python conflict
-
-ROS 2 Jazzy is built against **system Python 3.12**. Pin the workspace to system Python:
-
-```bash
-cd ~/ros2_ws
-pyenv local system
-```
-
-This ensures `colcon build` uses system Python 3.12 (which has `rclpy`), while your
-global Python 3.11 still works for the reprocessor GUI.
 
 ---
 
@@ -403,7 +363,7 @@ Copy these files from the backpack to the processing machine:
   reprocessor_presets/          # Saved parameter presets
 ```
 
-Install Python dependencies for the reprocessor GUI (under pyenv Python 3.11):
+Install Python dependencies for the reprocessor GUI:
 
 ```bash
 pip install PyQt5 pyyaml flask
@@ -506,16 +466,15 @@ ros2 bag play ~/pointclouds/<scan>/bag --clock --rate 0.5 \
 
 | Problem | Fix |
 |---------|-----|
-| `ModuleNotFoundError: No module named 'rclpy'` | The script that imports rclpy (`scan_monitor.py`) must run with system Python 3.12 (`/usr/bin/python3`), not pyenv. The reprocessor handles this automatically. |
-| PyQt5 import error | Install under pyenv: `pip install PyQt5` |
+| `ModuleNotFoundError: No module named 'rclpy'` | Make sure you've sourced `~/ros2_ws/install/setup.bash` and are using system Python 3.12 (`/usr/bin/python3`). |
+| PyQt5 import error | Install with: `pip install PyQt5` |
 | Can't find scan directories | Scans must be in `~/pointclouds/`. Each subdirectory needs a `bag/` folder. |
 
 ### General
 
 | Problem | Fix |
 |---------|-----|
-| `colcon build` uses wrong Python | Run `pyenv local system` in `~/ros2_ws` |
-| `ModuleNotFoundError: No module named 'em'` | Same as above — pyenv conflict |
+| `ModuleNotFoundError: No module named 'em'` | Install with: `sudo apt install python3-empy` |
 | GCC 13 new warnings breaking build | Add `-Wno-dangling-reference` to cmake args: `colcon build --cmake-args -DCMAKE_CXX_FLAGS="-Wno-dangling-reference"` |
 
 ---

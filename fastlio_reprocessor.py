@@ -32,7 +32,6 @@ PRESET_DIR = Path(__file__).parent / "reprocessor_presets"
 ROS2_WS = Path.home() / "ros2_ws"
 PROJECT_DIR = Path(__file__).parent.resolve()
 FASTLIO_CONFIG_DIR = ROS2_WS / "src" / "FAST_LIO_ROS2" / "config"
-FASTLIO_LOG_DIR = ROS2_WS / "src" / "FAST_LIO_ROS2" / "Log"
 HEALTH_FILE = "/tmp/scan_health.json"
 
 SOURCE_CMD = (
@@ -384,7 +383,6 @@ class ProcessManager:
         self.frozen_elapsed = None  # Elapsed time frozen when bag finishes
         self.bag_duration = 0  # expected duration in seconds
         self.play_rate = 1.0
-        self.start_at_offset = 0  # bag-seconds to skip at start
         self.output_dir = None
         self._stop_event = threading.Event()
         self._time_monitor = None
@@ -403,7 +401,7 @@ class ProcessManager:
         return proc is not None and proc.poll() is None
 
     def start_replay(self, scan_dir, bag_info, config_yaml, rate=1.0,
-                     stop_at=0, start_at=0, open_rviz=True):
+                     stop_at=0, open_rviz=True):
         """Start the full replay pipeline."""
         with self.lock:
             if self.state not in (self.IDLE, self.COMPLETED, self.CRASHED):
@@ -415,32 +413,24 @@ class ProcessManager:
         self.status_log.clear()
         self.bag_duration = bag_info["duration_s"]
         self.play_rate = rate
-        self.start_at_offset = start_at
 
         thread = threading.Thread(
             target=self._run_pipeline,
-            args=(scan_dir, bag_info, config_yaml, rate, stop_at, start_at,
-                  open_rviz),
+            args=(scan_dir, bag_info, config_yaml, rate, stop_at, open_rviz),
             daemon=True,
         )
         thread.start()
         return True, "Starting replay..."
 
-    def _run_pipeline(self, scan_dir, bag_info, config_yaml, rate, stop_at,
-                      start_at, open_rviz):
+    def _run_pipeline(self, scan_dir, bag_info, config_yaml, rate, stop_at, open_rviz):
         try:
             sensor = bag_info["sensor"]
-            scan_name = scan_dir.name
 
-            # Create output directory: {reprocess_time}_{original_scan_name}
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            out_name = f"{timestamp}_{scan_name}"
+            # Create output directory
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_name = f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{sensor}_reprocess_{timestamp}"
             self.output_dir = REPROCESS_DIR / out_name
             self.output_dir.mkdir(parents=True, exist_ok=True)
-
-            # Set PCD filename based on scan name
-            pcd_name = f"reprocess_{scan_name}.pcd"
-            config_yaml["/**"]["ros__parameters"]["map_file_path"] = f"./{pcd_name}"
 
             # Write config YAML to output dir
             config_path = self.output_dir / "fastlio_config.yaml"
@@ -485,56 +475,37 @@ class ProcessManager:
                 return
 
             # 4. Start replay
-            offset_msg = f" (starting at {start_at}s)" if start_at > 0 else ""
-            self._log(f"Starting {sensor} bag replay at {rate}x{offset_msg}...")
-            bag_path = bag_info["bag_path"]
-            start_offset_arg = f" --start-offset {start_at}" if start_at > 0 else ""
+            self.start_time = time.time()
+            self._log(f"Starting {sensor} bag replay at {rate}x...")
 
             if sensor == "ouster":
-                # Start ouster driver nodes (without bag play)
+                bag_path = bag_info["bag_path"]
                 metadata_path = bag_info.get("metadata_path", "")
-                driver_cmd = (
+                replay_cmd = (
                     f"{SOURCE_CMD} && "
                     f"ros2 launch ouster_ros replay.composite.launch.xml "
-                    f"bag_file:=b "
+                    f"bag_file:={bag_path} "
                     f"metadata:={metadata_path} "
                     f"viz:=false "
                     f"use_system_default_qos:=true "
                     f"point_cloud_frame:=os_sensor "
-                    f"point_type:=original"
-                )
-                self._start_process("ouster_driver", driver_cmd)
-                if self._stop_event.wait(5):
-                    return
-
-                # Start bag play separately (supports --start-offset)
-                qos_path = (
-                    ROS2_WS / "install" / "ouster_ros" / "share"
-                    / "ouster_ros" / "config" / "metadata-qos-override.yaml"
-                )
-                replay_cmd = (
-                    f"{SOURCE_CMD} && "
-                    f"ros2 bag play {bag_path} --clock --rate {rate}"
-                    f"{start_offset_arg}"
-                    f" --remap /os_node/metadata:=/ouster/metadata"
-                    f" /os_node/imu_packets:=/ouster/imu_packets"
-                    f" /os_node/lidar_packets:=/ouster/lidar_packets"
-                    f" --qos-profile-overrides-path {qos_path}"
+                    f"point_type:=original "
+                    f"play_rate:={rate} "
+                    f"play_delay:=5"
                 )
             else:
+                bag_path = bag_info["bag_path"]
                 replay_cmd = (
                     f"{SOURCE_CMD} && "
                     f"ros2 bag play {bag_path} --clock --rate {rate}"
-                    f"{start_offset_arg}"
                 )
 
-            self.start_time = time.time()
             self._start_process("replay", replay_cmd)
 
             # 5. If stop_at > 0, start time monitor
             if stop_at > 0:
                 self._time_monitor = threading.Thread(
-                    target=self._watch_time, args=(stop_at, start_at, rate),
+                    target=self._watch_time, args=(stop_at, rate),
                     daemon=True,
                 )
                 self._time_monitor.start()
@@ -550,7 +521,6 @@ class ProcessManager:
                     with self.lock:
                         if self.start_time:
                             self.frozen_elapsed = (
-                                self.start_at_offset +
                                 (time.time() - self.start_time) * self.play_rate
                             )
                         self.state = self.CRASHED
@@ -581,11 +551,9 @@ class ProcessManager:
                 if self.state == self.RUNNING:
                     self.state = self.IDLE
 
-    def _watch_time(self, stop_at, start_at, rate):
+    def _watch_time(self, stop_at, rate):
         """Monitor elapsed time and stop replay when stop_at is reached."""
-        # Wall time needed = (stop_at - start_at) bag-seconds at given rate
-        play_duration = max(stop_at - start_at, 1)
-        wall_stop = play_duration / rate
+        wall_stop = stop_at / rate  # wall-clock seconds at given rate
         while not self._stop_event.wait(1):
             if self.start_time is None:
                 continue
@@ -618,20 +586,6 @@ class ProcessManager:
         except (ProcessLookupError, OSError):
             pass
 
-    def _copy_logs_to_output(self):
-        """Copy FAST-LIO log files (trajectory, etc.) to the output directory."""
-        if self.output_dir is None:
-            return
-        import shutil
-        for name in ("pos_log.txt", "mat_out.txt"):
-            src = FASTLIO_LOG_DIR / name
-            if src.is_file():
-                try:
-                    shutil.copy2(src, self.output_dir / name)
-                    self._log(f"Copied {name} to output")
-                except Exception as e:
-                    self._log(f"Failed to copy {name}: {e}")
-
     def save_pcd(self):
         """Call FAST-LIO /map_save service. Skips if FAST-LIO is dead."""
         if not self._fastlio_alive():
@@ -652,7 +606,6 @@ class ProcessManager:
             )
             if result.returncode == 0:
                 self._log("PCD saved successfully")
-                self._copy_logs_to_output()
                 ok = True
             else:
                 self._log(f"/map_save failed: {result.stderr.strip()}")
@@ -692,7 +645,6 @@ class ProcessManager:
                     )
                     if result.returncode == 0:
                         self._log("PCD saved")
-                        self._copy_logs_to_output()
                     else:
                         self._log(f"PCD save failed: {result.stderr.strip()}")
                 except subprocess.TimeoutExpired:
@@ -707,7 +659,7 @@ class ProcessManager:
         time.sleep(0.5)
 
         # SIGINT the rest
-        for name in ["replay", "ouster_driver", "monitor", "fastlio"]:
+        for name in ["replay", "monitor", "fastlio"]:
             self._kill_process(name, signal.SIGINT)
 
         # Wait with timeout
@@ -726,7 +678,7 @@ class ProcessManager:
 
         # Freeze elapsed if not already frozen
         if self.frozen_elapsed is None and self.start_time is not None:
-            self.frozen_elapsed = self.start_at_offset + (time.time() - self.start_time) * self.play_rate
+            self.frozen_elapsed = (time.time() - self.start_time) * self.play_rate
 
         with self.lock:
             self.processes.clear()
@@ -742,12 +694,12 @@ class ProcessManager:
         self._log("All processes stopped.")
 
     def get_elapsed_bag_seconds(self):
-        """Get elapsed time in bag-seconds (adjusted for rate and start offset)."""
+        """Get elapsed time in bag-seconds (adjusted for rate)."""
         if self.frozen_elapsed is not None:
             return self.frozen_elapsed
         if self.start_time is None:
-            return self.start_at_offset if self.start_at_offset else 0
-        return self.start_at_offset + (time.time() - self.start_time) * self.play_rate
+            return 0
+        return (time.time() - self.start_time) * self.play_rate
 
     def is_active(self):
         """True if processes are running or bag completed (awaiting save/stop)."""
@@ -772,9 +724,6 @@ class ReprocessorWindow(QMainWindow):
         self.scan_dirs = []
         self.current_bag_info = None
         self._prev_log_len = 0  # Track log growth for status updates
-        self._prev_health_status = None  # Track health changes for logging
-        self._prev_health_msg = None
-        self._last_health_issue_time = 0.0  # When the last warn/error started
 
         self._build_ui()
         self._load_scan_list()
@@ -901,14 +850,6 @@ class ReprocessorWindow(QMainWindow):
         self.rate_spin.setSingleStep(0.1)
         self.rate_spin.setSuffix("x")
         pb_layout.addWidget(self.rate_spin)
-
-        pb_layout.addWidget(QLabel("Start at:"))
-        self.start_at_spin = QDoubleSpinBox()
-        self.start_at_spin.setRange(0, 99999)
-        self.start_at_spin.setValue(0)
-        self.start_at_spin.setSuffix("s")
-        self.start_at_spin.setToolTip("Skip this many bag-seconds at the start. Useful if the scanner was being picked up or jostled. 0 = start from beginning.")
-        pb_layout.addWidget(self.start_at_spin)
 
         pb_layout.addWidget(QLabel("Stop at:"))
         self.stop_at_spin = QDoubleSpinBox()
@@ -1296,7 +1237,7 @@ class ReprocessorWindow(QMainWindow):
             _set_yaml_value(data, "common.imu_topic", "/ouster/imu")
 
         # Defaults that aren't in the schema but are required
-        data.setdefault("runtime_pos_log_enable", True)
+        data.setdefault("runtime_pos_log_enable", False)
         if "common" not in data:
             data["common"] = {}
         data["common"].setdefault("time_sync_en", False)
@@ -1337,26 +1278,14 @@ class ReprocessorWindow(QMainWindow):
 
         config_yaml = self._build_config_yaml()
         rate = self.rate_spin.value()
-        start_at = self.start_at_spin.value()
         stop_at = self.stop_at_spin.value()
         open_rviz = self.rviz_check.isChecked()
 
-        # Validate start/stop
-        if stop_at > 0 and start_at >= stop_at:
-            QMessageBox.warning(
-                self, "Invalid Range",
-                f"Start time ({start_at}s) must be less than stop time ({stop_at}s)."
-            )
-            return
-
         ok, msg = self.process_mgr.start_replay(
-            scan_dir, bag_info, config_yaml, rate, stop_at, start_at, open_rviz,
+            scan_dir, bag_info, config_yaml, rate, stop_at, open_rviz,
         )
 
         if ok:
-            self._prev_health_status = None
-            self._prev_health_msg = None
-            self._last_health_issue_time = 0.0
             self.process_btn.setEnabled(False)
             self.stop_btn.setEnabled(True)
             self.save_btn.setEnabled(True)
@@ -1435,9 +1364,7 @@ class ReprocessorWindow(QMainWindow):
         if self.stop_at_spin.value() > 0:
             total = min(total, self.stop_at_spin.value())
 
-        # Cap elapsed at total so display doesn't count past the end
-        display_elapsed = min(bag_elapsed, total)
-        b_min, b_sec = divmod(int(display_elapsed), 60)
+        b_min, b_sec = divmod(int(bag_elapsed), 60)
         t_min, t_sec = divmod(int(total), 60)
 
         if state == mgr.COMPLETED:
@@ -1445,9 +1372,8 @@ class ReprocessorWindow(QMainWindow):
                 f"{t_min:02d}:{t_sec:02d} / {t_min:02d}:{t_sec:02d}"
             )
         elif state == mgr.CRASHED:
-            c_min, c_sec = divmod(int(bag_elapsed), 60)
             self.elapsed_label.setText(
-                f"{c_min:02d}:{c_sec:02d} / {t_min:02d}:{t_sec:02d} (crashed)"
+                f"{b_min:02d}:{b_sec:02d} / {t_min:02d}:{t_sec:02d} (crashed)"
             )
         elif state in (mgr.RUNNING, mgr.SAVING):
             self.elapsed_label.setText(
@@ -1476,24 +1402,10 @@ class ReprocessorWindow(QMainWindow):
                     health = json.load(f)
 
                 status = health.get("status", "unknown")
-                message = health.get("message", status)
                 colors = {"ok": "#4caf50", "warn": "#ff9800", "error": "#f44336"}
                 color = colors.get(status, "#888")
-                self.health_status.setText(message)
+                self.health_status.setText(health.get("message", status))
                 self.health_status.setStyleSheet(f"color: {color};")
-
-                # Log health changes (jumps, drifts, warnings)
-                if message != self._prev_health_msg:
-                    if status in ("warn", "error"):
-                        if self._prev_health_status not in ("warn", "error"):
-                            self._last_health_issue_time = time.time()
-                        mgr._log(f"Health {status}: {message}")
-                    elif self._prev_health_status in ("warn", "error"):
-                        # Only log recovery if the issue lasted more than 5s
-                        if time.time() - self._last_health_issue_time > 5:
-                            mgr._log("Health recovered: ok")
-                    self._prev_health_status = status
-                    self._prev_health_msg = message
 
                 for key in ("pos_cov", "rot_cov", "speed", "points", "msg_rate"):
                     val = health.get(key, "\u2014")
