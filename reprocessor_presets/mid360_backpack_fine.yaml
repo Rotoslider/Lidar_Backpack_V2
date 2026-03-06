@@ -7,8 +7,8 @@
       time_sync_en: false
     cube_side_length: 1000.0
     feature_extract_enable: false
-    filter_size_map: 0.15000000000000002
-    filter_size_surf: 0.15000000000000002
+    filter_size_map: 0.15
+    filter_size_surf: 0.15
     map_file_path: ./scan.pcd
     mapping:
       acc_cov: 0.1
@@ -30,9 +30,10 @@
       - -0.0233
       - 0.0441
       extrinsic_est_en: true
+      gravity_align_en: true
       fov_degree: 360.0
       gyr_cov: 0.1
-    max_iteration: 3
+    max_iteration: 4
     pcd_save:
       interval: -1
       pcd_save_en: true
@@ -47,4 +48,4 @@
       path_en: true
       scan_bodyframe_pub_en: true
       scan_publish_en: true
-    runtime_pos_log_enable: false
+    runtime_pos_log_enable: true

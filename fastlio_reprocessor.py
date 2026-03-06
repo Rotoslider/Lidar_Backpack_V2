@@ -35,8 +35,16 @@ FASTLIO_CONFIG_DIR = ROS2_WS / "src" / "FAST_LIO_ROS2" / "config"
 FASTLIO_LOG_DIR = ROS2_WS / "src" / "FAST_LIO_ROS2" / "Log"
 HEALTH_FILE = "/tmp/scan_health.json"
 
+def _detect_ros2_distro():
+    """Find the first installed ROS 2 distro (prefer jazzy, humble, etc.)."""
+    for distro in ("jazzy", "humble", "iron", "rolling"):
+        setup = Path(f"/opt/ros/{distro}/setup.bash")
+        if setup.exists():
+            return str(setup)
+    raise RuntimeError("No ROS 2 distro found in /opt/ros/")
+
 SOURCE_CMD = (
-    "source /opt/ros/humble/setup.bash && "
+    f"source {_detect_ros2_distro()} && "
     f"source {ROS2_WS}/install/setup.bash"
 )
 
@@ -162,6 +170,19 @@ PARAM_SCHEMA = [
         "min": 0.000001, "max": 1.0, "step": 0.0001, "decimals": 6,
     },
     # --- Extrinsics ---
+    {
+        "category": "Extrinsics",
+        "path": "mapping.gravity_align_en",
+        "label": "Gravity Alignment",
+        "type": "bool",
+        "default": True,
+        "tooltip": (
+            "Rotate initial pose so Z points up using IMU accelerometer. "
+            "Produces level scans but adds EKF load. Disable if you see "
+            "position jumps or SLAM instability, especially with Ouster on "
+            "slower hardware or ROS 2 Jazzy. Original ROS 1 behavior = OFF."
+        ),
+    },
     {
         "category": "Extrinsics",
         "path": "mapping.extrinsic_est_en",
@@ -501,7 +522,8 @@ class ProcessManager:
                     f"viz:=false "
                     f"use_system_default_qos:=true "
                     f"point_cloud_frame:=os_sensor "
-                    f"point_type:=original"
+                    f"point_type:=original "
+                    f"organized:=false"
                 )
                 self._start_process("ouster_driver", driver_cmd)
                 if self._stop_event.wait(5):
@@ -515,6 +537,7 @@ class ProcessManager:
                 replay_cmd = (
                     f"{SOURCE_CMD} && "
                     f"ros2 bag play {bag_path} --clock --rate {rate}"
+                    f" --read-ahead-queue-size 1000"
                     f"{start_offset_arg}"
                     f" --remap /os_node/metadata:=/ouster/metadata"
                     f" /os_node/imu_packets:=/ouster/imu_packets"

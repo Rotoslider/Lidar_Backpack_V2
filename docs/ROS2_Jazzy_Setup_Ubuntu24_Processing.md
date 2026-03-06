@@ -20,7 +20,7 @@ hardware, no motor, no hotspot needed.
 ## Table of Contents
 
 1. [Prerequisites](#1-prerequisites)
-2. [Install Python Dependencies](#2-install-python-dependencies)
+2. [Create a Python Virtual Environment](#2-create-a-python-virtual-environment)
 3. [Install ROS 2 Jazzy](#3-install-ros-2-jazzy)
 4. [Create the Colcon Workspace](#4-create-the-colcon-workspace)
 5. [Install System Dependencies](#5-install-system-dependencies)
@@ -43,14 +43,20 @@ hardware, no motor, no hotspot needed.
 
 ---
 
-## 2. Install Python Dependencies
+## 2. Create a Python Virtual Environment
 
-Ubuntu 24.04 ships with Python 3.12 which works with both ROS 2 Jazzy and the
-reprocessor GUI. No need for pyenv or alternate Python versions.
+Ubuntu 24.04's system Python 3.12 works for everything including the reprocessor GUI.
+However, PEP 668 blocks `pip install` into system Python directly, so we use a venv.
 
 ```bash
-sudo apt install -y python3-pip python3-venv python3-dev git
+sudo apt install -y python3-pip python3-venv git
+python3 -m venv ~/reprocessor-venv
+source ~/reprocessor-venv/bin/activate
+pip install PyQt5 pyyaml flask setuptools
+deactivate
 ```
+
+The reprocessor will be run from this venv (see [step 10](#10-copy-the-processing-tools)).
 
 ---
 
@@ -101,7 +107,7 @@ echo "source /opt/ros/jazzy/setup.bash" >> ~/.bashrc
 ### 3e. Install dev tools
 
 ```bash
-sudo apt install -y python3-colcon-common-extensions python3-rosdep2 python3-vcstool
+sudo apt install -y python3-colcon-common-extensions python3-rosdep python3-vcstool
 sudo rosdep init
 rosdep update
 ```
@@ -187,10 +193,40 @@ the box.
 cd ~
 git clone https://github.com/Livox-SDK/Livox-SDK2.git
 cd Livox-SDK2
+```
+
+**GCC 13 fix** — add missing `#include <cstdint>` to all headers that use `uint8_t` etc.
+(GCC 13 no longer implicitly includes it):
+
+```bash
+grep -rl 'uint\(8\|16\|32\|64\)_t' sdk_core --include='*.h' \
+  | xargs grep -L 'cstdint\|stdint\.h' \
+  | while read f; do sed -i '0,/^#include/{s/^#include/#include <cstdint>\n#include/}' "$f"; done
+```
+
+Then build:
+
+```bash
 mkdir build && cd build
 cmake .. && make -j$(nproc)
 sudo make install
 sudo ldconfig
+```
+
+Livox-SDK2 doesn't install a CMake config file, which downstream packages need. Create one:
+
+```bash
+sudo mkdir -p /usr/local/lib/cmake/livox_sdk2
+sudo tee /usr/local/lib/cmake/livox_sdk2/livox_sdk2Config.cmake > /dev/null << 'EOF'
+find_path(livox_sdk2_INCLUDE_DIR NAMES livox_lidar_api.h PATHS /usr/local/include)
+find_library(livox_sdk2_LIBRARY NAMES livox_lidar_sdk_shared PATHS /usr/local/lib)
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(livox_sdk2 REQUIRED_VARS livox_sdk2_LIBRARY livox_sdk2_INCLUDE_DIR)
+if(livox_sdk2_FOUND)
+  set(livox_sdk2_LIBRARIES ${livox_sdk2_LIBRARY})
+  set(livox_sdk2_INCLUDE_DIRS ${livox_sdk2_INCLUDE_DIR})
+endif()
+EOF
 ```
 
 ### 7b. Clone the Livox ROS 2 driver
@@ -215,7 +251,7 @@ git clone https://github.com/tu-darmstadt-ros-pkg/livox_ros_driver2.git
 
 ```bash
 cd ~/ros2_ws
-rosdep install --from-paths src/livox_ros_driver2 --ignore-src -y
+rosdep install --from-paths src/livox_ros_driver2 --ignore-src -y --skip-keys=livox_sdk2
 colcon build --packages-select livox_ros_driver2
 source install/setup.bash
 ```
@@ -233,53 +269,12 @@ cd ~/ros2_ws/src
 git clone --recursive https://github.com/Rotoslider/FAST_LIO_ROS2.git
 ```
 
-### 8b. Apply Jazzy compatibility patches
+### 8b. Build
 
-FAST-LIO was written for Humble. Jazzy has breaking API changes that must be fixed
-before building.
-
-**Patch 1: Subscriber callback signatures** — Jazzy removed non-const shared_ptr callbacks.
-
-```bash
-cd ~/ros2_ws/src/FAST_LIO_ROS2
-```
-
-In `src/laserMapping.cpp`, find any subscriber callbacks that use
-`std::shared_ptr<MsgType>` (non-const) and change to `std::shared_ptr<const MsgType>`.
-
-Look for patterns like:
-
-```cpp
-// BEFORE (Humble — won't compile on Jazzy):
-void imu_cbk(const sensor_msgs::msg::Imu::SharedPtr msg)
-void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
-void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::SharedPtr msg)
-
-// AFTER (Jazzy compatible — also works on Humble):
-void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
-void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg)
-void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr msg)
-```
-
-> `ConstSharedPtr` is an alias for `std::shared_ptr<const MsgType>`.
-
-**Patch 2: tf2 header paths** — Jazzy removed legacy `.h` headers.
-
-In any file that includes tf2 headers, change `.h` to `.hpp`:
-
-```cpp
-// BEFORE:
-#include <tf2_sensor_msgs/tf2_sensor_msgs.h>
-#include <tf2_eigen/tf2_eigen.h>
-
-// AFTER:
-#include <tf2_sensor_msgs/tf2_sensor_msgs.hpp>
-#include <tf2_eigen/tf2_eigen.hpp>
-```
-
-> If FAST-LIO doesn't use these headers directly, skip this patch.
-
-### 8c. Build
+> The `Rotoslider/FAST_LIO_ROS2` fork already uses `UniquePtr` callbacks and compatible
+> tf2 headers, so no Jazzy patches are needed. If using a different FAST-LIO fork, you
+> may need to change `::SharedPtr` callback params to `::ConstSharedPtr` and `.h` tf2
+> includes to `.hpp`.
 
 ```bash
 cd ~/ros2_ws
@@ -355,7 +350,7 @@ colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
 Copy these files from the backpack to the processing machine:
 
 ```
-~/projects/Lidar_Backpack_V2/
+~/Projects/Lidar_Backpack_V2/
   fastlio_reprocessor.py       # Reprocessor GUI
   scan_monitor.py              # Health monitor (ROS 2 node)
   templates/                   # Not needed for reprocessor
@@ -363,14 +358,7 @@ Copy these files from the backpack to the processing machine:
   reprocessor_presets/          # Saved parameter presets
 ```
 
-Install Python dependencies for the reprocessor GUI:
-
-```bash
-pip install PyQt5 pyyaml flask
-```
-
-> `flask` is listed because the reprocessor imports some shared utilities. If it doesn't,
-> you can skip it.
+Python dependencies were already installed in the venv (step 2). 
 
 ### Copy scan bags
 
@@ -398,7 +386,8 @@ Each scan directory should contain:
 ### 11a. Using the Reprocessor GUI
 
 ```bash
-cd ~/projects/Lidar_Backpack_V2
+source ~/reprocessor-venv/bin/activate
+cd ~/Projects/Lidar_Backpack_V2
 python3 fastlio_reprocessor.py
 ```
 
@@ -458,6 +447,7 @@ ros2 bag play ~/pointclouds/<scan>/bag --clock --rate 0.5 \
 
 | Error | Fix |
 |-------|-----|
+| `std::uint8_t does not name a type` in `define.h` | Add `#include <cstdint>` to `sdk_core/comm/define.h` (see step 7a) |
 | `LIVOX_INTERFACES_INCLUDE_DIRECTORIES is set to NOTFOUND` | Use the TU Darmstadt fork (step 7b) |
 | CMake can't find Livox SDK2 | Verify `/usr/local/lib/liblivox_lidar_sdk_shared.so` exists. Run `sudo ldconfig`. |
 | `build.sh humble` fails on Jazzy | Don't use `build.sh`. Use `colcon build --packages-select livox_ros_driver2` directly (with the TU Darmstadt fork) |
@@ -466,15 +456,16 @@ ros2 bag play ~/pointclouds/<scan>/bag --clock --rate 0.5 \
 
 | Problem | Fix |
 |---------|-----|
-| `ModuleNotFoundError: No module named 'rclpy'` | Make sure you've sourced `~/ros2_ws/install/setup.bash` and are using system Python 3.12 (`/usr/bin/python3`). |
-| PyQt5 import error | Install with: `pip install PyQt5` |
+| `ModuleNotFoundError: No module named 'rclpy'` | The script that imports rclpy (`scan_monitor.py`) must run with system Python 3.12 (`/usr/bin/python3`), not the venv. The reprocessor handles this automatically. |
+| PyQt5 import error | Activate the venv first: `source ~/reprocessor-venv/bin/activate` |
 | Can't find scan directories | Scans must be in `~/pointclouds/`. Each subdirectory needs a `bag/` folder. |
 
 ### General
 
 | Problem | Fix |
 |---------|-----|
-| `ModuleNotFoundError: No module named 'em'` | Install with: `sudo apt install python3-empy` |
+| `colcon build` uses wrong Python | Make sure the reprocessor venv is **not** activated when building. Run `deactivate` first. |
+| `ModuleNotFoundError: No module named 'em'` | Same as above — don't build from inside the venv |
 | GCC 13 new warnings breaking build | Add `-Wno-dangling-reference` to cmake args: `colcon build --cmake-args -DCMAKE_CXX_FLAGS="-Wno-dangling-reference"` |
 
 ---

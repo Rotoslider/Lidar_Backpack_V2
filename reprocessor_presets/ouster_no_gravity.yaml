@@ -9,7 +9,7 @@
     feature_extract_enable: false
     filter_size_map: 0.15000000000000008
     filter_size_surf: 0.15000000000000008
-    map_file_path: ./test.pcd
+    map_file_path: ./scan.pcd
     mapping:
       acc_cov: 0.1
       b_acc_cov: 0.0001
@@ -30,14 +30,14 @@
       - 0.0
       - 0.0
       extrinsic_est_en: false
-      gravity_align_en: true
       fov_degree: 360.0
+      gravity_align_en: false
       gyr_cov: 0.1
     max_iteration: 4
     pcd_save:
       interval: -1
       pcd_save_en: true
-    point_filter_num: 1
+    point_filter_num: 2
     preprocess:
       blind: 1.5
       lidar_type: 3

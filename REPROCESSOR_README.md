@@ -57,14 +57,14 @@ for scan directories in other locations.
 
 ### Parameter Editor
 
-26 parameters across 7 tabs, all with tooltips:
+27 parameters across 7 tabs, all with tooltips:
 
 | Tab | Key Parameters |
 |-----|---------------|
 | **Resolution** | `filter_size_surf`, `filter_size_map`, `point_filter_num`, `max_iteration` |
 | **Range** | `blind` (min range), `det_range` (max range), `fov_degree` |
 | **IMU Noise** | `acc_cov`, `gyr_cov`, `b_acc_cov`, `b_gyr_cov` |
-| **Extrinsics** | `extrinsic_est_en`, translation vector, rotation matrix |
+| **Extrinsics** | `gravity_align_en`, `extrinsic_est_en`, translation vector, rotation matrix |
 | **Preprocess** | `lidar_type`, `scan_line`, `timestamp_unit` |
 | **Publish** | Path, scan, dense publish toggles |
 | **PCD** | Save enable, interval, output path |
@@ -134,10 +134,42 @@ in the log, instead of hanging.
 - If FAST-LIO crashed, PCD save is skipped automatically
 - If FAST-LIO is alive but unresponsive, the 30s timeout will fire and be logged
 
+## ROS 2 Compatibility
+
+The reprocessor auto-detects the installed ROS 2 distro (Jazzy, Humble, etc.)
+and sources the correct setup files. No manual configuration needed.
+
+### FAST-LIO MultiThreadedExecutor
+
+FAST-LIO has been modified to use a 2-thread `MultiThreadedExecutor` with
+separate callback groups. This ensures that point cloud and IMU data is
+received continuously on one thread while SLAM processing runs on another.
+Without this, the original single-threaded executor blocked subscription
+callbacks during heavy IKF/ICP processing, causing frame drops and position
+jumps — especially with dense Ouster point clouds.
+
+This fix applies to both replay (reprocessor) and live operation (backpack).
+It works on both Humble and Jazzy.
+
+### Ouster Replay Specifics
+
+Ouster bags are replayed through the `ouster_ros` driver with:
+- `organized:=false` — prevents NaN points from reaching FAST-LIO
+- `--read-ahead-queue-size 1000` — prevents the bag player from dropping messages
+- QoS overrides for metadata topic (transient_local/reliable)
+
+### Gravity Alignment Toggle
+
+The **Extrinsics** tab includes a "Gravity Alignment" checkbox. When enabled
+(default), FAST-LIO rotates the initial pose so Z points up using IMU
+accelerometer data during initialization. This produces level scans
+regardless of sensor mounting angle.
+
+Disable it if you see position jumps or SLAM instability. The original
+ROS 1 FAST-LIO behavior is equivalent to gravity alignment OFF.
+
 ## Dependencies
 
-- Python 3 (system `/usr/bin/python3`, not pyenv — needs system PyQt5)
-- PyQt5 (`python3-pyqt5` system package)
-- PyYAML
-- ROS 2 Humble (ouster_ros, fast_lio, livox_ros_driver2)
+- Python 3.10+ with PyQt5 and PyYAML (via venv on Ubuntu 24.04)
+- ROS 2 Humble or Jazzy (ouster_ros, fast_lio, livox_ros_driver2)
 - scan_monitor.py (from this repo)

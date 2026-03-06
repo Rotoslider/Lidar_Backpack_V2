@@ -23,6 +23,15 @@ from flask import Flask, render_template, jsonify, request
 
 MIN_DISK_MB = 1024  # Minimum free disk space (MB) to start a scan
 
+
+def _detect_ros2_setup():
+    """Find the first installed ROS 2 distro setup.bash."""
+    for distro in ("jazzy", "humble", "iron", "rolling"):
+        setup = Path(f"/opt/ros/{distro}/setup.bash")
+        if setup.exists():
+            return str(setup)
+    raise RuntimeError("No ROS 2 distro found in /opt/ros/")
+
 # ---------------------------------------------------------------------------
 # Motor Controller (reused from v0.2 — Miranda I2C control)
 # ---------------------------------------------------------------------------
@@ -287,7 +296,7 @@ class LidarManager:
             self.output_dir.mkdir(parents=True, exist_ok=True)
 
             source_cmd = (
-                "source /opt/ros/humble/setup.bash && "
+                f"source {_detect_ros2_setup()} && "
                 f"source {self.ros2_ws}/install/setup.bash"
             )
 
@@ -511,7 +520,7 @@ class LidarManager:
         """Call FAST-LIO's /map_save service to write PCD before shutdown."""
         try:
             source_cmd = (
-                "source /opt/ros/humble/setup.bash && "
+                f"source {_detect_ros2_setup()} && "
                 f"source {self.ros2_ws}/install/setup.bash"
             )
             cmd = f"{source_cmd} && ros2 service call /map_save std_srvs/srv/Trigger"
