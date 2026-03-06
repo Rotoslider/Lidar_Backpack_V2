@@ -30,6 +30,9 @@ SPEED_ERROR = 8.0    # impossible on foot
 JUMP_WARN = 0.3      # 30cm in one odom step is suspicious
 JUMP_ERROR = 0.8     # 80cm in one step is a re-localization failure
 
+# How long to keep jump warning active after the last jump (seconds)
+JUMP_COOLDOWN = 10.0
+
 # Point count thresholds (registered cloud points per message)
 POINTS_WARN = 50     # very few features being matched
 POINTS_ERROR = 10    # effectively blind
@@ -59,6 +62,12 @@ class ScanMonitor(Node):
         self.rot_cov = 0.0
         self.speed = 0.0
         self.jump = 0.0
+
+        # Jump tracking — peak between timer writes and session totals
+        self.peak_jump = 0.0       # largest jump since last health write
+        self.jump_count = 0        # total jumps this session
+        self.last_jump_time = 0.0  # time of most recent jump
+        self.max_jump = 0.0        # largest jump this session
 
         # Point count tracking
         self.cloud_points = -1  # -1 = no data yet
@@ -106,6 +115,16 @@ class ScanMonitor(Node):
                 self.speed = dist / dt
                 self.jump = dist
 
+                # Track significant jumps
+                if dist > JUMP_WARN:
+                    self.jump_count += 1
+                    self.last_jump_time = now
+                    self.max_jump = max(self.max_jump, dist)
+
+                # Keep peak jump between timer writes (odom is much faster
+                # than the 1 Hz timer, so a jump could be missed otherwise)
+                self.peak_jump = max(self.peak_jump, dist)
+
         self.prev_pos = (px, py, pz)
         self.prev_time = now
 
@@ -144,8 +163,18 @@ class ScanMonitor(Node):
         status, message = self._evaluate()
         self._write_health(status, message)
 
+        # Reset peak jump for next evaluation interval
+        self.peak_jump = 0.0
+
     def _evaluate(self):
         """Evaluate health status from all available metrics."""
+        time_since_jump = (
+            time.time() - self.last_jump_time
+            if self.last_jump_time > 0 else float("inf")
+        )
+        # Use peak jump since last health write (catches jumps between 1Hz ticks)
+        jump_val = self.peak_jump
+
         # --- ERROR conditions (red) ---
 
         # Point starvation: sensor blocked/covered
@@ -155,10 +184,18 @@ class ScanMonitor(Node):
                 f"({self.cloud_points} pts)"
             )
 
-        # Position jump: re-localization failure
-        if self.jump > JUMP_ERROR:
+        # Position jump: current interval
+        if jump_val > JUMP_ERROR:
             return "error", (
-                f"POSITION JUMP — {self.jump:.2f}m shift detected"
+                f"POSITION JUMP — {jump_val:.2f}m shift "
+                f"({self.jump_count} jumps total)"
+            )
+
+        # Recent large jump still in cooldown
+        if time_since_jump < JUMP_COOLDOWN and self.max_jump > JUMP_ERROR:
+            return "error", (
+                f"POSITION JUMP — {self.max_jump:.2f}m max "
+                f"({self.jump_count} jumps total)"
             )
 
         # Covariance blowup
@@ -180,9 +217,19 @@ class ScanMonitor(Node):
                 f"scan quality degraded"
             )
 
-        # Position jump (smaller)
-        if self.jump > JUMP_WARN:
-            return "warn", f"Position jump — {self.jump:.2f}m shift"
+        # Position jump: current interval
+        if jump_val > JUMP_WARN:
+            return "warn", (
+                f"Position jump — {jump_val:.2f}m "
+                f"({self.jump_count} jumps total)"
+            )
+
+        # Recent jumps still in cooldown
+        if time_since_jump < JUMP_COOLDOWN and self.jump_count > 0:
+            return "warn", (
+                f"Position unstable — {self.jump_count} jumps, "
+                f"{self.max_jump:.2f}m max"
+            )
 
         # Rising covariance
         if self.pos_cov > POS_COV_WARN:
@@ -209,6 +256,8 @@ class ScanMonitor(Node):
             "speed": round(self.speed, 2),
             "points": self.cloud_points,
             "msg_rate": round(msg_rate, 1),
+            "jump_count": self.jump_count,
+            "max_jump": round(self.max_jump, 3),
             "timestamp": time.time(),
         }
         try:
