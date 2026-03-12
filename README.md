@@ -22,6 +22,7 @@ Phone Browser (http://10.42.0.1:5000)
         |
         +-- I2C: Miranda motor controller (Ouster only)
         +-- TCP:  Ouster standby control (port 7501)
+        +-- UDP:  Livox standby control (via livox_workmode + Livox SDK2)
         +-- Hotspot watchdog (auto-restores WiFi AP if it drops)
 ```
 
@@ -59,6 +60,8 @@ Phone Browser (http://10.42.0.1:5000)
 | `Backpack Scanner.desktop` | GNOME desktop shortcut (installed to `~/Desktop/`) |
 | `50-backpack-network.pkla` | PolicyKit rule for NetworkManager access from systemd |
 | `backpack-scanner-sudoers` | Sudoers rule for passwordless service start/stop and computer shutdown |
+| `livox_workmode.cpp` | C++ tool source — sets Livox MID-360 work mode via SDK2 |
+| `livox_workmode` | Compiled binary (build: `g++ -o livox_workmode livox_workmode.cpp -llivox_lidar_sdk_shared -lpthread`) |
 | `ouster_standby.json` | Ouster config for STANDBY mode (legacy, not currently used) |
 | `ouster_normal.json` | Ouster config for NORMAL mode (legacy, not currently used) |
 
@@ -134,6 +137,7 @@ journalctl -u backpack-scanner -f        # tail logs live
 1. **Select lidar** — tap Ouster OS0-32 or Livox MID-360
 2. **Start Scan** — the app runs pre-flight checks then launches processes in sequence:
    - Pre-flight: disk space check, sensor ping
+   - Livox: wake from standby → 12s motor spin-up wait (Livox only)
    - Lidar driver (40s warmup for Ouster, 5s for Livox)
    - FAST-LIO2 SLAM (with RViz if display available, headless otherwise)
    - Bag recording (raw packets for Ouster, point cloud + IMU for Livox)
@@ -145,9 +149,10 @@ journalctl -u backpack-scanner -f        # tail logs live
    - Red = drift detected (stop and restart scan)
 4. **Stop Scan** — gracefully saves data and stops everything. Activity shows
    each step as it happens:
-   - Ouster set to STANDBY, motor stopped
+   - Ouster: set to STANDBY, motor stopped
    - Saving PCD... → Saved PCD (renamed with timestamp)
    - Saving bag... → Saved bag
+   - Livox: set to standby (motor and laser off)
    - Saved metadata
    - Scan complete
 
@@ -289,6 +294,43 @@ this automatically during its initialization.
 
 ---
 
+## Livox MID-360 Standby Control
+
+The Livox MID-360 defaults to Sampling mode on power-on (motor running, laser firing).
+When not scanning, the app puts it into standby mode to stop the motor and laser,
+reducing power draw and motor wear.
+
+This uses a small C++ tool (`livox_workmode`) that links against the Livox SDK2 shared
+library (`liblivox_lidar_sdk_shared.so`) to send work-mode commands over UDP:
+
+```bash
+./livox_workmode <config.json> standby   # motor off, laser off
+./livox_workmode <config.json> normal    # motor on, laser on (sampling)
+```
+
+**MID-360 work modes:**
+
+| SDK Value | Mode | Motor | Laser | Power |
+|-----------|------|-------|-------|-------|
+| `0x01` (Normal) | Sampling | Running | Firing | Full (~6.5W) |
+| `0x02` (WakeUp) | Standby | Off | Off | Low |
+| `0x03` (Sleep) | — | — | — | Not supported by MID-360 firmware |
+
+**Important:** The tool and the Livox ROS 2 driver share the same UDP ports
+(56100–56501). They cannot run simultaneously. The scanner sequences them:
+tool finishes and releases ports before the driver launches, and the driver is
+killed before the tool runs again.
+
+**Timing on scan start:** The tool takes ~5s (SDK init + lidar discovery + command),
+then a 12s countdown waits for the motor to spin up before launching the driver.
+
+**Rebuild after SDK update:**
+```bash
+g++ -o livox_workmode livox_workmode.cpp -llivox_lidar_sdk_shared -lpthread
+```
+
+---
+
 ## Troubleshooting
 
 | Problem | Cause | Fix |
@@ -343,10 +385,11 @@ MIN_DISK_MB = 1024  # Minimum free disk space (MB) to start a scan
 ## Dependencies
 
 - Python 3.11 (Flask app via pyenv)
-- Python 3.10 (scan_monitor via system Python, for rclpy compatibility)
+- Python 3.10/3.12 (scan_monitor via system Python, for rclpy compatibility)
 - Flask (`pip install flask`)
 - smbus2 (`pip install smbus2`, for motor I2C control)
-- ROS 2 Humble (system install)
+- ROS 2 Humble or Jazzy (auto-detected at runtime)
 - Ouster ROS 2 driver
 - Livox ROS 2 driver
+- Livox SDK2 (`liblivox_lidar_sdk_shared.so` — for livox_workmode tool)
 - FAST-LIO2 ROS 2
