@@ -128,6 +128,10 @@ class LidarManager:
         # Ouster sensor hostname (matches driver_params.yaml)
         self.ouster_hostname = "os-122134000147.local"
 
+        # Livox MID-360 power control
+        self.livox_config = self.ros2_ws / "src" / "livox_ros_driver2" / "config" / "MID360_config.json"
+        self.livox_workmode_tool = self.project_dir / "livox_workmode"
+
     def _set_message(self, msg):
         with self.lock:
             self.message = msg
@@ -276,6 +280,10 @@ class LidarManager:
 
         self._kill_all_processes()
 
+        # Put Livox to standby in background (ports freed by _kill_all_processes)
+        if self.lidar_type == "livox":
+            threading.Thread(target=self._set_livox_standby, daemon=True).start()
+
         with self.lock:
             self.state = self.IDLE
 
@@ -299,6 +307,21 @@ class LidarManager:
                 f"source {_detect_ros2_setup()} && "
                 f"source {self.ros2_ws}/install/setup.bash"
             )
+
+            # 0. Wake Livox from standby (must finish before driver claims UDP ports)
+            if self.lidar_type == "livox":
+                self._set_message("Setting Livox MID-360 to Normal...")
+                if not self._set_livox_normal():
+                    # Non-fatal: the ROS driver also sets Normal on connect
+                    print("[Scan] Livox wake command failed, continuing anyway")
+                if not self._is_active():
+                    self._abort_startup("Cancelled by user")
+                    return
+                if not self._wait_countdown(
+                    12, "Livox motor starting ({remaining}s)...",
+                ):
+                    self._abort_startup("Cancelled during Livox wake-up")
+                    return
 
             # 1. Launch lidar driver
             if self.lidar_type == "ouster":
@@ -478,11 +501,17 @@ class LidarManager:
             self._kill_all_processes(sig=signal.SIGINT)
             self._set_message("Saved bag")
 
+            # 6. Set Livox to standby (ports now free after process kill)
+            if self.lidar_type == "livox":
+                self._set_message("Setting Livox to standby...")
+                time.sleep(1)  # Brief delay for UDP port release
+                self._set_livox_standby()
+
             if self.scan_start_time:
                 self.last_elapsed = int(time.time() - self.scan_start_time)
             self.scan_start_time = None
 
-            # 6. Copy metadata
+            # 7. Copy metadata
             self._set_message("Saved metadata")
 
             # Clean up health file
@@ -503,11 +532,13 @@ class LidarManager:
     def force_stop(self):
         """Emergency kill — always works regardless of state."""
         self._set_message("Force stopping all processes...")
+        lidar = self.lidar_type  # Snapshot before state reset
         try:
             self.motor.stop_motor()
         except Exception:
             pass
-        self._set_ouster_standby()
+        if lidar == "ouster":
+            self._set_ouster_standby()
         self._kill_all_processes()
         if self.scan_start_time:
             self.last_elapsed = int(time.time() - self.scan_start_time)
@@ -515,6 +546,9 @@ class LidarManager:
         with self.lock:
             self.state = self.IDLE
         self._set_message("Force stopped.")
+        # Put Livox to standby in background (ports freed by _kill_all_processes)
+        if lidar == "livox":
+            threading.Thread(target=self._set_livox_standby, daemon=True).start()
 
     def _call_map_save(self):
         """Call FAST-LIO's /map_save service to write PCD before shutdown."""
@@ -566,6 +600,35 @@ class LidarManager:
         except Exception:
             pass
 
+    def _livox_set_workmode(self, mode, timeout=20):
+        """Call the livox_workmode helper to change MID-360 work mode.
+        mode: 'standby' or 'normal'.  Returns True on success."""
+        try:
+            result = subprocess.run(
+                [str(self.livox_workmode_tool), str(self.livox_config), mode],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            if result.returncode == 0:
+                print(f"[Livox] Work mode set to {mode}")
+                return True
+            else:
+                print(f"[Livox] Failed to set {mode}: {result.stderr.strip()}")
+                return False
+        except subprocess.TimeoutExpired:
+            print(f"[Livox] Timeout setting work mode to {mode}")
+            return False
+        except Exception as e:
+            print(f"[Livox] Error setting work mode: {e}")
+            return False
+
+    def _set_livox_standby(self, timeout=20):
+        """Best-effort: put Livox MID-360 into standby (motor on, laser off)."""
+        self._livox_set_workmode("standby", timeout=timeout)
+
+    def _set_livox_normal(self):
+        """Set Livox MID-360 to normal (sampling) mode. Returns True on success."""
+        return self._livox_set_workmode("normal")
+
     def emergency_cleanup(self):
         """Called on process exit (signal/atexit) — stop motor & lidar, kill children."""
         print("\n[Cleanup] Emergency cleanup triggered...")
@@ -578,6 +641,10 @@ class LidarManager:
         except Exception:
             pass
         self._kill_all_processes()
+        try:
+            self._set_livox_standby(timeout=10)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
